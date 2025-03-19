@@ -17,18 +17,13 @@ type Options struct {
 
 	// MaxInclusionFileSize is the maximum size of files to index in bytes
 	MaxInclusionFileSize int
-
-	// MaxResponseSize limits the size of files sent to LLM
-	MaxResponseSize int
 }
 
+// Options returns a slice of Option functions based on the Options fields
 func (o *Options) Options() []Option {
 	var result []Option
 	if o.MaxInclusionFileSize > 0 {
 		result = append(result, WithMaxIndexableSize(o.MaxInclusionFileSize))
-	}
-	if o.MaxResponseSize > 0 {
-		result = append(result, WithMaxResponseSize(o.MaxResponseSize))
 	}
 	if o.ExclusionPatterns != nil {
 		result = append(result, WithExclusionPatterns(o.ExclusionPatterns...))
@@ -65,13 +60,6 @@ func WithExclusionPatterns(patterns ...string) Option {
 func WithMaxIndexableSize(size int) Option {
 	return func(o *Options) {
 		o.MaxInclusionFileSize = size
-	}
-}
-
-// WithMaxResponseSize sets the maximum size for LLM responses
-func WithMaxResponseSize(size int) Option {
-	return func(o *Options) {
-		o.MaxResponseSize = size
 	}
 }
 
