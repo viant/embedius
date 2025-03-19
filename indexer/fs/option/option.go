@@ -18,9 +18,6 @@ type Options struct {
 	// MaxInclusionFileSize is the maximum size of files to index in bytes
 	MaxInclusionFileSize int
 
-	// IncludeFile indicates whether to include files in the index
-	IncludeFile bool
-
 	// MaxResponseSize limits the size of files sent to LLM
 	MaxResponseSize int
 }
@@ -38,9 +35,6 @@ func (o *Options) Options() []Option {
 	}
 	if o.InclusionPatterns != nil {
 		result = append(result, WithInclusionPatterns(o.InclusionPatterns...))
-	}
-	if o.IncludeFile {
-		result = append(result, WithIncludeFile(o.IncludeFile))
 	}
 	return result
 }
@@ -94,12 +88,6 @@ func WithGitignore(reader io.Reader) Option {
 func WithInclusionPatterns(patterns ...string) Option {
 	return func(o *Options) {
 		o.InclusionPatterns = append(o.InclusionPatterns, patterns...)
-	}
-}
-
-func WithIncludeFile(include bool) Option {
-	return func(o *Options) {
-		o.IncludeFile = include
 	}
 }
 
