@@ -18,11 +18,31 @@ type Options struct {
 	// MaxInclusionFileSize is the maximum size of files to index in bytes
 	MaxInclusionFileSize int
 
+	// IncludeFile indicates whether to include files in the index
+	IncludeFile bool
+
 	// MaxResponseSize limits the size of files sent to LLM
 	MaxResponseSize int
+}
 
-	// MatchStrategy is the strategy to use for file retrieval
-	MatchStrategy string
+func (o *Options) Options() []Option {
+	var result []Option
+	if o.MaxInclusionFileSize > 0 {
+		result = append(result, WithMaxIndexableSize(o.MaxInclusionFileSize))
+	}
+	if o.MaxResponseSize > 0 {
+		result = append(result, WithMaxResponseSize(o.MaxResponseSize))
+	}
+	if o.ExclusionPatterns != nil {
+		result = append(result, WithExclusionPatterns(o.ExclusionPatterns...))
+	}
+	if o.InclusionPatterns != nil {
+		result = append(result, WithInclusionPatterns(o.InclusionPatterns...))
+	}
+	if o.IncludeFile {
+		result = append(result, WithIncludeFile(o.IncludeFile))
+	}
+	return result
 }
 
 // NewOptions creates a new Options instance with default values
@@ -61,13 +81,6 @@ func WithMaxResponseSize(size int) Option {
 	}
 }
 
-// WithMatchStrategy sets the match strategy
-func WithMatchStrategy(strategy string) Option {
-	return func(o *Options) {
-		o.MatchStrategy = strategy
-	}
-}
-
 // WithGitignore adds patterns from a .gitignore file
 func WithGitignore(reader io.Reader) Option {
 	return func(m *Options) {
@@ -81,6 +94,12 @@ func WithGitignore(reader io.Reader) Option {
 func WithInclusionPatterns(patterns ...string) Option {
 	return func(o *Options) {
 		o.InclusionPatterns = append(o.InclusionPatterns, patterns...)
+	}
+}
+
+func WithIncludeFile(include bool) Option {
+	return func(o *Options) {
+		o.IncludeFile = include
 	}
 }
 
