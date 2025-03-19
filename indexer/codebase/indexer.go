@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// Codebase implements indexing for codebase projects
-type Codebase struct {
+// Indexer implements indexing for codebase projects
+type Indexer struct {
 	ProjectInfoByName *cache.Map[string, repository.Project]
 	ProjectInfo       *cache.Map[string, repository.Project]
 	Project           *cache.Map[string, info.Project]
@@ -24,7 +24,7 @@ type Codebase struct {
 }
 
 // LookupProject returns project for the specified URI
-func (i *Codebase) LookupProject(URI string) (*info.Project, error) {
+func (i *Indexer) LookupProject(URI string) (*info.Project, error) {
 	project, ok := i.Project.Get(URI)
 	if !ok {
 		return nil, fmt.Errorf("failed to find project for URI: %s", URI)
@@ -33,7 +33,7 @@ func (i *Codebase) LookupProject(URI string) (*info.Project, error) {
 }
 
 // Namespace returns a namespace for the specified URI
-func (i *Codebase) Namespace(ctx context.Context, URI string) (string, error) {
+func (i *Indexer) Namespace(ctx context.Context, URI string) (string, error) {
 	projectRepo, err := i.getProjectInfo(URI)
 	if err != nil {
 		return "", err
@@ -50,7 +50,7 @@ func (i *Codebase) Namespace(ctx context.Context, URI string) (string, error) {
 	return strconv.Itoa(int(embeddingsHash)) + "_" + projectFragment + "_" + projectRepo.Type, nil
 }
 
-func (i *Codebase) getProjectInfo(URI string) (*repository.Project, error) {
+func (i *Indexer) getProjectInfo(URI string) (*repository.Project, error) {
 	project, ok := i.ProjectInfo.Get(URI)
 	if !ok {
 		var err error
@@ -65,7 +65,7 @@ func (i *Codebase) getProjectInfo(URI string) (*repository.Project, error) {
 }
 
 // Index indexes a codebase project
-func (i *Codebase) Index(ctx context.Context, URI string, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
+func (i *Indexer) Index(ctx context.Context, URI string, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
 	projectInfo, err := i.getProjectInfo(URI)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get project repository: %w", err)
@@ -111,9 +111,9 @@ func (i *Codebase) Index(ctx context.Context, URI string, cache *cache.Map[strin
 	return schemaDocuments, idsToRemove, nil
 }
 
-// New creates a new Codebase instance
-func New(embeddingsModel string) *Codebase {
-	return &Codebase{
+// New creates a new Indexer instance
+func New(embeddingsModel string) *Indexer {
+	return &Indexer{
 		detector:          repository.New(),
 		ProjectInfo:       cache.NewMap[string, repository.Project](),
 		Project:           cache.NewMap[string, info.Project](),

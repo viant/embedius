@@ -6,7 +6,7 @@ import (
 )
 
 // ProjectDocuments returns a list of projects with their matched documents
-func (i *Codebase) ProjectDocuments(docs []schema.Document) []*Project {
+func (i *Indexer) ProjectDocuments(docs []schema.Document) []*Project {
 	var projects = make(map[string]*Project)
 	for _, doc := range docs {
 		schemaDoc := SchemaDocument(doc)
