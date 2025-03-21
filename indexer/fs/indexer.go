@@ -73,11 +73,11 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 			continue
 		}
 
-		URI := object.Name()
+		name := object.Name()
 
 		if object.IsDir() {
 			// Recursively index subdirectories
-			subDocuments, subToRemove, err := i.Index(ctx, URI, cache)
+			subDocuments, subToRemove, err := i.Index(ctx, url.Join(location, name), cache)
 			if err != nil {
 				return nil, nil, err
 			}

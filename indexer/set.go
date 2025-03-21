@@ -148,14 +148,9 @@ func (s *Set) load(ctx context.Context) error {
 	}
 	URL := s.assetURL()
 	exists, err := s.fs.Exists(ctx, URL)
-	if err != nil {
-		return fmt.Errorf("failed to check if asset exists: %w", err)
-	}
-
 	if !exists {
 		return nil
 	}
-
 	data, err := s.fs.DownloadWithURL(ctx, URL)
 	if err != nil {
 		return fmt.Errorf("failed to open asset: %w", err)

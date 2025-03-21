@@ -81,8 +81,9 @@ func (p *Document) Document() schema.Document {
 
 // Helper function to safely extract a string from metadata
 func getStringFromMetadata(metadata map[string]any, key string) string {
-	if value, ok := metadata[key].(string); ok {
-		return value
+	if value, ok := metadata[key]; ok {
+		text, _ := value.(string)
+		return text
 	}
 	return ""
 }
