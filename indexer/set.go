@@ -13,6 +13,7 @@ import (
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/indexer/cache"
 	"github.com/viant/embedius/vectordb"
+	"github.com/viant/embedius/vectordb/meta"
 	"strings"
 )
 
@@ -32,7 +33,11 @@ type Set struct {
 // SimilaritySearch performs similarity search against the vector vectorDb
 func (s *Set) SimilaritySearch(ctx context.Context, query string, numDocuments int, opts ...vectorstores.Option) ([]schema.Document, error) {
 	opts = s.ensureEmbedder(opts)
-	return s.vectorDb.SimilaritySearch(ctx, query, numDocuments, opts...)
+	documents, err := s.vectorDb.SimilaritySearch(ctx, query, numDocuments, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search vector vectorDb: %w", err)
+	}
+	return documents, nil
 }
 
 // ensureEmbedder ensures the vector vectorDb options include an embedder
@@ -83,9 +88,9 @@ func (s *Set) updateEntriesWithIDs(documents []schema.Document, ids []string) er
 		}
 		doc := documents[i]
 		metadata := doc.Metadata
-		docID, ok := metadata[document.DocumentID].(string)
+		docID, ok := metadata[meta.DocumentID].(string)
 		if !ok {
-			fmt.Printf(document.DocumentID+" not found in metadata for document %+v\n", metadata)
+			fmt.Printf(meta.DocumentID+" not found in metadata for document %+v\n", metadata)
 			continue
 		}
 
@@ -96,9 +101,9 @@ func (s *Set) updateEntriesWithIDs(documents []schema.Document, ids []string) er
 
 		fragment := entry.Fragments[0]
 		if len(entry.Fragments) > 1 { //more than one fragment use fragmentID
-			fragmentID, ok := metadata[document.FragmentID].(string)
+			fragmentID, ok := metadata[meta.FragmentID].(string)
 			if !ok {
-				fmt.Printf(document.FragmentID+" not found in metadata for document %+v\n", metadata)
+				fmt.Printf(meta.FragmentID+" not found in metadata for document %+v\n", metadata)
 				continue
 			}
 

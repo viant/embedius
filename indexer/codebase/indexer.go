@@ -6,6 +6,7 @@ import (
 	"github.com/tmc/langchaingo/schema"
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/indexer/cache"
+	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/linager/inspector"
 	"github.com/viant/linager/inspector/info"
 	"github.com/viant/linager/inspector/repository"
@@ -101,7 +102,7 @@ func (i *Indexer) Index(ctx context.Context, URI string, cache *cache.Map[string
 			Hash:    doc.Hash,
 			Fragments: []*document.Fragment{{
 				Meta: map[string]string{
-					document.DocumentID: doc.GetID(),
+					meta.DocumentID: doc.GetID(),
 				}}}}
 
 		cache.Set(doc.GetID(), entry)

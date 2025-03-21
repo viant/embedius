@@ -2,7 +2,7 @@ package codebase
 
 import (
 	"github.com/tmc/langchaingo/schema"
-	"github.com/viant/embedius/document"
+	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/linager/inspector/info"
 	"strconv"
 	"strings"
@@ -25,7 +25,7 @@ func (d SchemaDocuments) InfoDocuments() map[string][]*info.Document {
 
 func (d *SchemaDocument) Document() *info.Document {
 
-	fragmentID := getStringFromMetadata(d.Metadata, document.FragmentID)
+	fragmentID := meta.GetString(d.Metadata, meta.FragmentID)
 	part := 0
 	if fragmentID != "" {
 		index := strings.LastIndex(fragmentID, ":")
@@ -34,14 +34,14 @@ func (d *SchemaDocument) Document() *info.Document {
 		}
 	}
 	return &info.Document{
-		ID:        getStringFromMetadata(d.Metadata, document.DocumentID),
-		Name:      getStringFromMetadata(d.Metadata, "name"),
-		Path:      getStringFromMetadata(d.Metadata, "path"),
+		ID:        meta.GetString(d.Metadata, meta.DocumentID),
+		Name:      meta.GetString(d.Metadata, "name"),
+		Path:      meta.GetString(d.Metadata, meta.PathKey),
 		Part:      part,
-		Project:   getStringFromMetadata(d.Metadata, "project"),
-		Package:   getStringFromMetadata(d.Metadata, "package"),
-		Kind:      info.DocumentKind(getStringFromMetadata(d.Metadata, "kind")),
-		Signature: getStringFromMetadata(d.Metadata, "signature"),
+		Project:   meta.GetString(d.Metadata, "project"),
+		Package:   meta.GetString(d.Metadata, "package"),
+		Kind:      info.DocumentKind(meta.GetString(d.Metadata, "kind")),
+		Signature: meta.GetString(d.Metadata, "signature"),
 		Content:   d.PageContent,
 	}
 }
@@ -53,14 +53,14 @@ func (p *Document) Document() schema.Document {
 		return schema.Document{
 			PageContent: p.Content,
 			Metadata: map[string]interface{}{
-				document.DocumentID: p.ID,
-				document.FragmentID: p.ID + ":" + strconv.Itoa(p.Part),
-				"name":              p.Name,
-				"path":              p.Path,
-				"project":           p.Project,
-				"package":           p.Package,
-				"kind":              string(p.Kind),
-				"signature":         p.Signature,
+				meta.DocumentID:   p.ID,
+				meta.FragmentID:   p.ID + ":" + strconv.Itoa(p.Part),
+				meta.NameKey:      p.Name,
+				meta.PathKey:      p.Path,
+				meta.ProjectKey:   p.Project,
+				meta.PackageKey:   p.Package,
+				meta.KindKey:      string(p.Kind),
+				meta.SignatureKey: p.Signature,
 			},
 		}
 	}
@@ -68,22 +68,15 @@ func (p *Document) Document() schema.Document {
 	return schema.Document{
 		PageContent: p.Content,
 		Metadata: map[string]interface{}{
-			document.DocumentID: p.ID,
-			"name":              p.Name,
-			"path":              p.Path,
-			"project":           p.Project,
-			"package":           p.Package,
-			"kind":              string(p.Kind),
-			"signature":         p.Signature,
+			meta.DocumentID:   p.ID,
+			meta.NameKey:      p.Name,
+			meta.PathKey:      p.Path,
+			meta.ProjectKey:   p.Project,
+			meta.PackageKey:   p.Package,
+			meta.KindKey:      string(p.Kind),
+			meta.SignatureKey: p.Signature,
 		},
 	}
 }
 
 // Helper function to safely extract a string from metadata
-func getStringFromMetadata(metadata map[string]any, key string) string {
-	if value, ok := metadata[key]; ok {
-		text, _ := value.(string)
-		return text
-	}
-	return ""
-}

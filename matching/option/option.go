@@ -9,27 +9,27 @@ import (
 // Options provides common configuration options between retriever and executor
 type Options struct {
 
-	// ExclusionPatterns contains patterns of files/directories to exclude
-	ExclusionPatterns []string
+	// Exclusions contains patterns of files/directories to exclude
+	Exclusions []string
 
 	// InclusionPattern contains patterns of files/directories to include
-	InclusionPatterns []string
+	Inclusions []string
 
-	// MaxInclusionFileSize is the maximum size of files to index in bytes
-	MaxInclusionFileSize int
+	// MaxFileSize is the maximum size of files to index in bytes
+	MaxFileSize int
 }
 
 // Options returns a slice of Option functions based on the Options fields
 func (o *Options) Options() []Option {
 	var result []Option
-	if o.MaxInclusionFileSize > 0 {
-		result = append(result, WithMaxIndexableSize(o.MaxInclusionFileSize))
+	if o.MaxFileSize > 0 {
+		result = append(result, WithMaxIndexableSize(o.MaxFileSize))
 	}
-	if o.ExclusionPatterns != nil {
-		result = append(result, WithExclusionPatterns(o.ExclusionPatterns...))
+	if o.Exclusions != nil {
+		result = append(result, WithExclusionPatterns(o.Exclusions...))
 	}
-	if o.InclusionPatterns != nil {
-		result = append(result, WithInclusionPatterns(o.InclusionPatterns...))
+	if o.Inclusions != nil {
+		result = append(result, WithInclusionPatterns(o.Inclusions...))
 	}
 	return result
 }
@@ -40,8 +40,8 @@ func NewOptions(opts ...Option) *Options {
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.ExclusionPatterns == nil {
-		options.ExclusionPatterns = getDefaultPatterns()
+	if options.Exclusions == nil {
+		options.Exclusions = getDefaultPatterns()
 	}
 	return options
 }
@@ -52,14 +52,14 @@ type Option func(*Options)
 // WithExclusionPatterns sets exclusion patterns
 func WithExclusionPatterns(patterns ...string) Option {
 	return func(o *Options) {
-		o.ExclusionPatterns = append(o.ExclusionPatterns, patterns...)
+		o.Exclusions = append(o.Exclusions, patterns...)
 	}
 }
 
 // WithMaxIndexableSize sets the maximum indexable file size
 func WithMaxIndexableSize(size int) Option {
 	return func(o *Options) {
-		o.MaxInclusionFileSize = size
+		o.MaxFileSize = size
 	}
 }
 
@@ -67,7 +67,7 @@ func WithMaxIndexableSize(size int) Option {
 func WithGitignore(reader io.Reader) Option {
 	return func(m *Options) {
 		if patterns := parseGitignore(reader); len(patterns) > 0 {
-			m.ExclusionPatterns = append(m.ExclusionPatterns, patterns...)
+			m.Exclusions = append(m.Exclusions, patterns...)
 		}
 	}
 }
@@ -75,14 +75,14 @@ func WithGitignore(reader io.Reader) Option {
 // WithInclusionPatterns adds patterns to include
 func WithInclusionPatterns(patterns ...string) Option {
 	return func(o *Options) {
-		o.InclusionPatterns = append(o.InclusionPatterns, patterns...)
+		o.Inclusions = append(o.Inclusions, patterns...)
 	}
 }
 
 // WithDefaultExclusionPatterns adds default exclusion patterns
 func WithDefaultExclusionPatterns() Option {
 	return func(m *Options) {
-		m.ExclusionPatterns = append(m.ExclusionPatterns, getDefaultPatterns()...)
+		m.Exclusions = append(m.Exclusions, getDefaultPatterns()...)
 	}
 }
 

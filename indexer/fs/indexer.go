@@ -9,8 +9,8 @@ import (
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/indexer/cache"
-	"github.com/viant/embedius/indexer/fs/matching"
 	"github.com/viant/embedius/indexer/fs/splitter"
+	"github.com/viant/embedius/matching"
 	"path/filepath"
 	"strconv"
 )
@@ -120,10 +120,13 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 	// Create new entry
 
 	entry := &document.Entry{
-		ID:        docId,
-		ModTime:   object.ModTime(),
-		Hash:      dataHash,
-		Fragments: aSplitter.Split(data, map[string]interface{}{document.DocumentID: docId}),
+		ID:      docId,
+		ModTime: object.ModTime(),
+		Hash:    dataHash,
+		Fragments: aSplitter.Split(data, map[string]interface{}{
+			document.DocumentID: docId,
+			"path":              docId,
+		}),
 	}
 	cache.Set(docId, entry)
 

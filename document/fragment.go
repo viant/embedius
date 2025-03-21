@@ -3,11 +3,7 @@ package document
 import (
 	"fmt"
 	"github.com/tmc/langchaingo/schema"
-)
-
-const (
-	DocumentID = "docId"
-	FragmentID = "fragmentId"
+	"github.com/viant/embedius/vectordb/meta"
 )
 
 // Fragments represents a collection of document fragments
@@ -17,7 +13,7 @@ type Fragments []*Fragment
 func (f Fragments) ByFragmentID(docID string) map[string]*Fragment {
 	var result = make(map[string]*Fragment)
 	for _, fragment := range f {
-		id, ok := fragment.Meta[FragmentID]
+		id, ok := fragment.Meta[meta.FragmentID]
 		if !ok {
 			id = fragment.ID(docID)
 		}
@@ -69,12 +65,12 @@ func (f *Fragment) NewDocument(path string, content []byte) schema.Document {
 	}
 
 	metadata := map[string]interface{}{
-		"path":     path,
-		"start":    f.Start,
-		"end":      f.End,
-		"checksum": f.Checksum,
-		DocumentID: path,
-		FragmentID: f.ID(path),
+		meta.PathKey:    path,
+		"start":         f.Start,
+		"end":           f.End,
+		"checksum":      f.Checksum,
+		meta.DocumentID: path,
+		meta.FragmentID: f.ID(path),
 	}
 
 	// Add metadata from the fragment

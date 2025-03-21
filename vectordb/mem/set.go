@@ -9,9 +9,11 @@ import (
 	"github.com/viant/afs"
 	"github.com/viant/afs/file"
 	"github.com/viant/afs/url"
+	"github.com/viant/embedius/matching"
+	"github.com/viant/embedius/matching/option"
 	store "github.com/viant/embedius/vectordb"
+	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/gds/tree/cover"
-	"github.com/viant/linager/inspector/info"
 	"os"
 	"strconv"
 	"strings"
@@ -20,12 +22,12 @@ import (
 )
 
 type Set struct {
-	id      string
-	modelId string
-	set     *cover.Tree[*store.Document]
-	cache   *MRUCache
+	id    string
+	set   *cover.Tree[*store.Document]
+	cache *MRUCache
 	sync.RWMutex
 	baseURL string
+	fs      afs.Service
 }
 
 func (s *Set) getBaseURL() string {
@@ -93,11 +95,6 @@ func (s *Set) assetURL(ext string) string {
 	builder := strings.Builder{}
 	builder.WriteString("index")
 	builder.WriteString("_")
-	if s.modelId != "" {
-		hash, _ := info.Hash([]byte(s.modelId))
-		builder.WriteString(strconv.Itoa(int(hash)))
-		builder.WriteString("_")
-	}
 	builder.WriteString(s.id)
 	builder.WriteString(ext)
 	treeURL := url.Join(s.getBaseURL(), builder.String())
@@ -205,10 +202,16 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, numDocuments i
 	for _, opt := range opts {
 		opt(&options)
 	}
+	var matcher *matching.Manager
 
+	if options.Filters != nil {
+		if matchOptions, ok := options.Filters.([]option.Option); ok {
+			matcher = matching.New(matchOptions...)
+		}
+	}
 	// Check cache first
 	if cachedVector, found := s.cache.Get(query); found {
-		return s.searchWithVector(cachedVector, numDocuments), nil
+		return s.searchWithVector(cachedVector, numDocuments, matcher), nil
 	}
 
 	vectors, err := options.Embedder.EmbedDocuments(ctx, []string{query})
@@ -218,11 +221,11 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, numDocuments i
 	point := cover.NewPoint(vectors[0]...)
 	// Cache the vector
 	s.cache.Put(query, point)
-	docs := s.searchWithVector(point, numDocuments)
+	docs := s.searchWithVector(point, numDocuments, matcher)
 	return docs, nil
 }
 
-func (s *Set) searchWithVector(point *cover.Point, numDocuments int) []schema.Document {
+func (s *Set) searchWithVector(point *cover.Point, numDocuments int, matcher *matching.Manager) []schema.Document {
 	var docs = make([]schema.Document, 0)
 	unique := make(map[string]bool)
 	neighbors := s.set.KNearestNeighbors(point, numDocuments)
@@ -238,8 +241,15 @@ func (s *Set) searchWithVector(point *cover.Point, numDocuments int) []schema.Do
 			}
 			unique[doc.PageContent] = true
 		}
+		if matcher != nil {
+			if s.IsExcluded(doc, matcher) {
+				continue
+			}
+		}
+
 		ret := *doc
 		ret.Score = 1 - neighbor.Distance
+
 		docs = append(docs, schema.Document(ret))
 	}
 	return docs
@@ -258,9 +268,22 @@ func (s *Set) Remove(ctx context.Context, id string, opts ...vectorstores.Option
 	return nil
 }
 
+func (s *Set) IsExcluded(doc *store.Document, matcher *matching.Manager) bool {
+	path := meta.GetString(doc.Metadata, "path")
+	if path == "" {
+		return false
+	}
+	object, _ := s.fs.Object(context.Background(), path)
+	if object == nil {
+		return false
+	}
+	return matcher.IsExcluded(object)
+}
+
 func NewSet(ctx context.Context, baseURL string, id string) (*Set, error) {
 	set := &Set{
 		id:      id,
+		fs:      afs.New(),
 		baseURL: baseURL,
 		set:     cover.NewTree[*store.Document](1.3, cover.DistanceFunctionCosine),
 		cache:   NewMRUCache(100),

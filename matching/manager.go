@@ -3,7 +3,7 @@ package matching
 import (
 	"github.com/viant/afs/storage"
 	"github.com/viant/afs/url"
-	"github.com/viant/embedius/indexer/fs/option"
+	"github.com/viant/embedius/matching/option"
 	"path/filepath"
 	"strings"
 )
@@ -27,8 +27,8 @@ func New(opts ...option.Option) *Manager {
 
 // IsExcluded checks if a path should be excluded based on the patterns
 func (m *Manager) IsExcluded(object storage.Object) bool {
-	if m.options.MaxInclusionFileSize > 0 {
-		if object.Size() > int64(m.options.MaxInclusionFileSize) {
+	if m.options.MaxFileSize > 0 {
+		if object.Size() > int64(m.options.MaxFileSize) {
 			return true
 		}
 	}
@@ -38,14 +38,14 @@ func (m *Manager) IsExcluded(object storage.Object) bool {
 	// Normalize path to use forward slashes
 	path = filepath.ToSlash(path)
 
-	if len(m.options.InclusionPatterns) > 0 {
+	if len(m.options.Inclusions) > 0 {
 		included := m.isIncluded(path)
 		if !included {
 			return true
 		}
 	}
 
-	for _, pattern := range m.options.ExclusionPatterns {
+	for _, pattern := range m.options.Exclusions {
 		pattern = strings.TrimSpace(pattern)
 		// Skip comments or empty lines
 		if pattern == "" || strings.HasPrefix(pattern, "#") {
@@ -86,7 +86,7 @@ func (m *Manager) isExcluded(path string, pattern string) bool {
 
 func (m *Manager) isIncluded(path string) bool {
 	var included bool
-	for _, pattern := range m.options.InclusionPatterns {
+	for _, pattern := range m.options.Inclusions {
 		pattern = strings.TrimSpace(pattern)
 		// Skip comments or empty lines
 		if pattern == "" || strings.HasPrefix(pattern, "#") {
