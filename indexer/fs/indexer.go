@@ -11,6 +11,7 @@ import (
 	"github.com/viant/embedius/indexer/cache"
 	"github.com/viant/embedius/indexer/fs/splitter"
 	"github.com/viant/embedius/matching"
+	"github.com/viant/embedius/vectordb/meta"
 	"path/filepath"
 	"strconv"
 )
@@ -124,8 +125,8 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 		ModTime: object.ModTime(),
 		Hash:    dataHash,
 		Fragments: aSplitter.Split(data, map[string]interface{}{
-			document.DocumentID: docId,
-			"path":              docId,
+			meta.DocumentID: docId,
+			"path":          docId,
 		}),
 	}
 	cache.Set(docId, entry)
