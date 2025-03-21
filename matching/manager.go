@@ -1,7 +1,7 @@
 package matching
 
 import (
-	"github.com/viant/afs/storage"
+	"github.com/viant/afs"
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/matching/option"
 	"path/filepath"
@@ -11,6 +11,7 @@ import (
 // Manager handles file/directory exclusion rules for retrieval and execution
 type Manager struct {
 	options *option.Options
+	fs      afs.Service
 }
 
 // Option defines a functional option for configuring the Manager
@@ -21,20 +22,21 @@ func New(opts ...option.Option) *Manager {
 	options := option.NewOptions(opts...)
 	manager := &Manager{
 		options: options,
+		fs:      afs.New(),
 	}
 	return manager
 }
 
 // IsExcluded checks if a path should be excluded based on the patterns
-func (m *Manager) IsExcluded(object storage.Object) bool {
+func (m *Manager) IsExcluded(location string, size int) bool {
 	if m.options.MaxFileSize > 0 {
-		if object.Size() > int64(m.options.MaxFileSize) {
+		if size > m.options.MaxFileSize {
 			return true
 		}
 	}
 
 	//storage object implements os.FileInfo
-	path := url.Path(object.URL())
+	path := url.Path(location)
 	// Normalize path to use forward slashes
 	path = filepath.ToSlash(path)
 

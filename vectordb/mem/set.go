@@ -273,11 +273,7 @@ func (s *Set) IsExcluded(doc *store.Document, matcher *matching.Manager) bool {
 	if path == "" {
 		return false
 	}
-	object, _ := s.fs.Object(context.Background(), path)
-	if object == nil {
-		return false
-	}
-	return matcher.IsExcluded(object)
+	return matcher.IsExcluded(path, len(doc.PageContent))
 }
 
 func NewSet(ctx context.Context, baseURL string, id string) (*Set, error) {

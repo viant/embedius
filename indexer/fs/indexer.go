@@ -69,11 +69,9 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 		if url.Equals(objectPath, location) {
 			continue
 		}
-
-		if i.matcher.IsExcluded(object) {
+		if i.matcher.IsExcluded(url.Path(object.URL()), int(object.Size())) {
 			continue
 		}
-
 		name := object.Name()
 
 		if object.IsDir() {
