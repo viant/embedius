@@ -63,41 +63,82 @@ func (m *Manager) IsExcluded(location string, size int) bool {
 }
 
 func (m *Manager) isExcluded(path string, pattern string) bool {
-	// Direct substring match (common case for directories like node_modules)
-	if strings.Contains(path, pattern) {
+	// Direct substring match for directory paths (e.g., node_modules/)
+	if strings.HasSuffix(pattern, "/") && strings.Contains(path, pattern) {
 		return true
 	}
 
-	// Try filepath pattern matching (like .gitignore patterns)
-	// Handle leading/trailing slashes and wildcards
-	cleanPattern := strings.TrimPrefix(pattern, "/")
-	if matched, _ := filepath.Match(cleanPattern, path); matched {
-		return true
+	// Handle relative patterns with leading **/ (match anywhere in path)
+	if strings.HasPrefix(pattern, "**/") {
+		suffix := strings.TrimPrefix(pattern, "**/")
+		return strings.HasSuffix(path, suffix) || strings.Contains(path, "/"+suffix)
 	}
-	if matched, _ := filepath.Match("*/"+cleanPattern, path); matched {
+
+	// Try filepath pattern matching for wildcard patterns
+	matched, err := filepath.Match(pattern, path)
+	if err == nil && matched {
 		return true
 	}
 
-	// Match just basename
-	baseName := filepath.Base(path)
-	if pattern == baseName || strings.HasSuffix(pattern, "/"+baseName) {
+	// Match against the basename
+	base := filepath.Base(path)
+	matched, err = filepath.Match(pattern, base)
+	if err == nil && matched {
 		return true
 	}
+
+	// Try to match pattern against any part of the path
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if matched, _ := filepath.Match(pattern, part); matched {
+			return true
+		}
+	}
+
+	// For patterns like *.go, try matching against the file extension
+	if strings.HasPrefix(pattern, "*.") {
+		extension := "." + strings.Split(pattern, ".")[1]
+		if strings.HasSuffix(path, extension) {
+			return true
+		}
+	}
+
 	return false
 }
 
 func (m *Manager) isIncluded(path string) bool {
-	var included bool
 	for _, pattern := range m.options.Inclusions {
 		pattern = strings.TrimSpace(pattern)
 		// Skip comments or empty lines
 		if pattern == "" || strings.HasPrefix(pattern, "#") {
 			continue
 		}
-		if strings.Contains(path, pattern) {
-			included = true
-			break
+
+		// Direct substring match for directory paths
+		if strings.HasSuffix(pattern, "/") && strings.Contains(path, pattern) {
+			return true
+		}
+
+		// Try filepath pattern matching for wildcard patterns
+		matched, err := filepath.Match(pattern, path)
+		if err == nil && matched {
+			return true
+		}
+
+		// Match against the basename
+		base := filepath.Base(path)
+		matched, err = filepath.Match(pattern, base)
+		if err == nil && matched {
+			return true
+		}
+
+		// For patterns like *.go, try matching against the file extension
+		if strings.HasPrefix(pattern, "*.") {
+			extension := "." + strings.Split(pattern, ".")[1]
+			if strings.HasSuffix(path, extension) {
+				return true
+			}
 		}
 	}
-	return included
+	return false
 }
