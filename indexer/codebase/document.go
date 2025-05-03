@@ -3,7 +3,7 @@ package codebase
 import (
 	"github.com/tmc/langchaingo/schema"
 	"github.com/viant/embedius/vectordb/meta"
-	"github.com/viant/linager/inspector/info"
+	info "github.com/viant/linager/inspector/graph"
 	"strconv"
 	"strings"
 )

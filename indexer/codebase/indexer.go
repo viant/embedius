@@ -8,7 +8,7 @@ import (
 	"github.com/viant/embedius/indexer/cache"
 	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/linager/inspector"
-	"github.com/viant/linager/inspector/info"
+	info "github.com/viant/linager/inspector/graph"
 	"github.com/viant/linager/inspector/repository"
 	"strconv"
 	"strings"

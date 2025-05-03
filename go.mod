@@ -11,7 +11,7 @@ require (
 	github.com/viant/afs v1.25.1
 	github.com/viant/bintly v0.2.0
 	github.com/viant/gds v0.4.5
-	github.com/viant/linager v0.0.0-20250319172745-7819464fd6b9
+	github.com/viant/linager v0.0.0-20250503232524-71e07f0aeb99
 	github.com/viant/scy v0.15.4
 )
 
@@ -36,3 +36,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/viant/linager => ../linager
