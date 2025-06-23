@@ -66,7 +66,7 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 
 	for _, object := range objects {
 		objectPath := url.Path(object.URL())
-		if url.Equals(objectPath, location) {
+		if url.Equals(objectPath, location) && object.IsDir() {
 			continue
 		}
 		if i.matcher.IsExcluded(url.Path(object.URL()), int(object.Size())) {
@@ -90,6 +90,7 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 			return nil, nil, err
 		}
 		toAddDocuments = append(toAddDocuments, docs...)
+
 		toRemove = append(toRemove, ids...)
 	}
 
