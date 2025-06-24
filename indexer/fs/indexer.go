@@ -52,9 +52,13 @@ func (i *Indexer) Namespace(ctx context.Context, URI string) (string, error) {
 
 // Index indexes content from the filesystem
 func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
-	path, err := filepath.Abs(location)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", location, err)
+	path := location
+	if url.Scheme(location, "") == "" && url.IsRelative(location) {
+		var err error
+		path, err = filepath.Abs(location)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", location, err)
+		}
 	}
 	objects, err := i.fs.List(ctx, path)
 	if err != nil {
