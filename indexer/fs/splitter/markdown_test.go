@@ -1,13 +1,9 @@
 package splitter
 
 import (
-	"embed"
 	"github.com/viant/embedius/document"
 	"testing"
 )
-
-//go:embed test_data.md
-var testData embed.FS
 
 func TestMarkdownSplitter_Split(t *testing.T) {
 	testCases := []struct {
