@@ -84,21 +84,38 @@ func (s *MarkdownSplitter) findHeadingBoundaries(data []byte) []int {
 	lines := bytes.Split(data, []byte{'\n'})
 
 	offset := 0
-	for _, line := range lines {
-		lineLen := len(line) + 1 // +1 for the newline character
+	lineLen := 0
+	prevLine := []byte{}
+	prevLineLen := 0
 
-		// Check for Markdown headings (both # style and underline style)
-		if len(line) > 0 && line[0] == '#' {
+	for i, line := range lines {
+		lineLen = len(line) + 1 // +1 for the newline character
+
+		// Check for Markdown headings (# ATX style and underline ---/=== Setext style)
+		//
+		// ATX-style headers (# style) requires a space after the # characters
+		//
+		// Setext-style - CommonMark, GitHub, Obsidian, and most modern Markdown engines require
+		// rules of valid H1/H2 heading:
+		// Must use at least 3 `=` or at least 3 `-`  characters
+		// No blank line above
+		// No extra characters allowed on the underline
+		// Max 3 leading spaces before `===` or `---`
+
+		if len(line) > 0 && isATXHeader(line) { // Check for ATX style headings (e.g., # Heading, ## Subheading)
 			if offset > 0 {
 				boundaries = append(boundaries, offset)
 			}
-		} else if len(line) > 2 && (bytes.HasPrefix(bytes.TrimSpace(line), []byte("--")) ||
-			bytes.HasPrefix(bytes.TrimSpace(line), []byte("=="))) {
-			if offset > 0 {
-				boundaries = append(boundaries, offset-len(lines[len(lines)-1])-1)
+		} else if i > 1 { // Check for Setext style headings (e.g., Heading\n=== or Heading\n---)
+			ok := isSetextUnderline(line) // Check if the line is a valid Setext underline
+			if ok && !isBlank(prevLine) {
+				// found setext-style header
+				boundaries = append(boundaries, offset-prevLineLen)
 			}
 		}
 
+		prevLine = line
+		prevLineLen = lineLen
 		offset += lineLen
 	}
 
@@ -140,4 +157,87 @@ func (s *MarkdownSplitter) splitBySize(data []byte, start, end int, path string)
 	}
 
 	return fragments
+}
+
+// Checks if the line is a valid Setext underline (=== or ---)
+func isSetextUnderline(line []byte) bool {
+	if len(line) < 3 {
+		return false
+	}
+
+	if line[0] != ' ' && line[0] != '-' && line[0] != '=' {
+		return false
+	}
+
+	leadingSpaces := len(line) - len(bytes.TrimLeft(line, " "))
+	if leadingSpaces > 3 {
+		return false
+	}
+
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) < 3 {
+		return false
+	}
+
+	first := trimmed[0]
+	if first != '=' && first != '-' {
+		return false
+	}
+
+	for _, ch := range trimmed {
+		if ch != first {
+			return false
+		}
+	}
+
+	return true
+}
+
+// Checks if the line is blank (contains only whitespace)
+func isBlank(line []byte) bool {
+	return len(bytes.TrimSpace(line)) == 0
+}
+
+// Checks if the line is ATX-style header (starts with # and has a space or nothing after)
+func isATXHeader(line []byte) bool {
+	if len(line) == 0 {
+		return false
+	}
+
+	if line[0] != ' ' && line[0] != '#' {
+		return false
+	}
+
+	trimmed := bytes.TrimLeft(line, " ")
+	leadingSpaces := len(line) - len(trimmed)
+	if leadingSpaces > 3 {
+		return false
+	}
+
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	first := trimmed[0]
+	if first != '#' {
+		return false
+	}
+
+	for i, ch := range trimmed {
+		if ch == first && i > 5 {
+			return false // More than 6 '#' characters is not valid
+		}
+
+		if ch != first {
+			if ch == ' ' { // Allow up to 6 '#' characters followed by a space
+				return true
+			} else {
+				return false
+			}
+		}
+
+	}
+
+	// Allow up to 6 '#' characters followed by nothing
+	return true
 }
