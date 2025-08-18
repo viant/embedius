@@ -27,10 +27,10 @@ require (
 	github.com/viant/vec v0.1.1-0.20240628004145-aad750556278 // indirect
 	github.com/viant/xreflect v0.6.2 // indirect
 	github.com/viant/xunsafe v0.9.3-0.20240530173106-69808f27713b // indirect
-	golang.org/x/crypto v0.29.0 // indirect
+	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/mod v0.23.0 // indirect
-	golang.org/x/oauth2 v0.21.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/oauth2 v0.30.0 // indirect
+	golang.org/x/sys v0.35.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
