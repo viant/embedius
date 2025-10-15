@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/tmc/langchaingo/schema"
-	"github.com/viant/afs"
 	"github.com/viant/afs/storage"
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/document"
@@ -18,7 +17,7 @@ import (
 
 // Indexer implements indexing for filesystem resources
 type Indexer struct {
-	fs              afs.Service
+	fs              Service
 	baseURL         string
 	matcher         *matching.Manager
 	splitterFactory *splitter.Factory
@@ -28,7 +27,21 @@ type Indexer struct {
 // New creates a new filesystem indexer
 func New(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory) *Indexer {
 	return &Indexer{
-		fs:              afs.New(),
+		fs:              NewAFS(),
+		baseURL:         baseURL,
+		matcher:         matcher,
+		embeddingsModel: embeddingsModel,
+		splitterFactory: splitterFactory,
+	}
+}
+
+// NewWithFS creates a new filesystem indexer with a custom FS service implementation.
+func NewWithFS(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory, fsSvc Service) *Indexer {
+	if fsSvc == nil {
+		fsSvc = NewAFS()
+	}
+	return &Indexer{
+		fs:              fsSvc,
 		baseURL:         baseURL,
 		matcher:         matcher,
 		embeddingsModel: embeddingsModel,
