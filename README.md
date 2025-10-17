@@ -33,8 +33,8 @@ package main
 import (
         "context"
         "fmt"
-        "github.com/tmc/langchaingo/embeddings"
-        "github.com/tmc/langchaingo/llms/openai"
+        "github.com/viant/embedius/embeddings"
+        oai "github.com/viant/embedius/embeddings/openai"
         "github.com/viant/embedius/indexer"
         "github.com/viant/embedius/indexer/codebase"
         "github.com/viant/embedius/vectordb/mem"
@@ -46,20 +46,9 @@ func main() {
         // Initialize context
         ctx := context.Background()
         
-        // Set up your embedding model
-        model, err := openai.New(
-                openai.WithToken(os.Getenv("OPENAI_API_KEY")),
-                openai.WithEmbeddingModel("text-embedding-3-small"),
-        )
-        if err != nil {
-                panic(err)
-        }
-        
-        // Create embedder
-        embedder, err := embeddings.NewEmbedder(model)
-        if err != nil {
-                panic(err)
-        }
+        // Wire OpenAI embedder (or your own implementation)
+        client := oai.NewClient(os.Getenv("OPENAI_API_KEY"), "text-embedding-3-small")
+        var embedder embeddings.Embedder = &oai.Embedder{C: client}
         
         // Set storage location
         baseURL := path.Join(os.Getenv("HOME"), ".embedius")
@@ -115,6 +104,161 @@ The vector database (`vectordb`) provides storage and retrieval of document embe
 - `vectordb.VectorStore`: Interface for vector storage operations
 - `vectordb.Persister`: Interface for persistence operations
 
+### Persistence (v2)
+
+- Index file: `index_<namespace>.tr2` (atomic, durable)
+  - Layout: `version(int16=2)` + `count(int32)` + repeated entries:
+    - `alive(int16)` 0/1
+    - `vector` length `int32` followed by `float32` elements
+    - `Ptr` fields: `segmentId(int32)`, `offset(int64)`, `length(int32)`
+  - Written atomically via temp file + rename; parent directory is fsynced.
+
+- Values externalization:
+  - Document payload bytes are stored in mmap-backed segments under `<baseURL>/data/<namespace>/` managed by `mmapstore`.
+  - Files: `manifest.json`, `data_*.vdat`, optional `writer.lock` (not replicated).
+
+- Zero-migration policy:
+  - If legacy v1 files are detected (`index_<ns>.tre`/`index_<ns>.dat`), the loader wipes them and starts fresh.
+  - Upstream sync also removes legacy `.tre/.dat` at destination to prevent confusion alongside `.tr2`.
+
+- Single-writer guard:
+  - A per-namespace `writer.lock` is held with an exclusive flock to prevent concurrent writers.
+  - Configurable behavior: non-blocking, blocking with timeout, or indefinite wait (see options below).
+
+### Queued Writes + Journal (SQLite)
+
+- Overview: keep payload bytes in mmap `ValueStore`, coordinate multi‑process writes via a small SQLite DB per namespace.
+  - Submitters enqueue jobs (`add`/`remove`) into `coord.db`.
+  - A single writer process (holding `writer.lock`) claims jobs, appends values, emits journal `events` with SCNs, and persists `.tr2` snapshots.
+  - Readers load `.tr2` and apply incremental events, updating a checkpoint.
+
+- SCN as ID:
+  - The writer assigns a strictly increasing SCN to each `add` event and stores it as the canonical document ID.
+  - v3 `.tr2` snapshots persist IDs, so deletes by SCN remain valid even after journal GC.
+  - Removes accept SCN strings as IDs; the writer emits a `remove` event with that ID, and readers mark the entry dead.
+
+- Enqueue + Retrieve IDs (sqlite build):
+  - Enqueue adds:
+    - `jobID, _ := store.EnqueueAdds(ctx, docs, vectorstores.WithEmbedder(embedder), vectorstores.WithNameSpace(ns))`
+  - Run writer for namespace:
+    - `store.RunNamespaceWriter(ctx, ns, mem.WithWriterBatchOpt(64))`
+  - Query results (SCN IDs):
+    - `ids, status, _ := store.JobResult(ctx, ns, jobID)`
+    - When `status == "done"`, `ids` contains SCN strings for the enqueued documents.
+
+- Remove by SCN:
+  - Submit a remove job with SCN IDs: `store.EnqueueRemoves(ctx, []string{"12345","12346"}, vectorstores.WithNameSpace(ns))`
+  - The writer emits `remove` events; readers mark entries dead on next journal sync.
+
+- Build/Run (writer/journal enabled):
+  - Add the pure-Go driver: `go get modernc.org/sqlite`
+  - Build with tag: `go build -tags sqlite ./...`
+  - Optional CLI writer runner:
+    - Build: `go build -tags sqlite ./cmd/embedius-writer`
+    - Run: `./embedius-writer -base=/path/to/base -ns=default -batch=64 -lease=15s`
+
+Example: enqueue → get SCN IDs → remove by SCN
+
+```go
+ctx := context.Background()
+ns := "default"
+
+// Create store with persistence and a reader tailer (optional)
+store := mem.NewStore(
+    mem.WithBaseURL(baseURL),
+    mem.WithExternalValues(true),
+    mem.WithTailInterval(500*time.Millisecond), // readers auto-sync
+)
+
+// 1) Enqueue add job (sqlite build required)
+docs := []schema.Document{{PageContent: "Future of Technology"}, {PageContent: "Famous Fairytales"}}
+jobID, err := store.EnqueueAdds(ctx, docs,
+    vectorstores.WithEmbedder(embedder),
+    vectorstores.WithNameSpace(ns),
+)
+if err != nil { panic(err) }
+
+// 2) Run the writer loop for this namespace (in a separate goroutine/process).
+// Enqueue opportunistically starts a short-lived writer too, but you can also
+// run a sustained writer as shown below. Configure default lease TTL with
+// mem.WithWriterLeaseTTL(...) on the Store.
+go func() {
+    if err := store.RunNamespaceWriter(ctx, ns, mem.WithWriterBatchOpt(64)); err != nil {
+        panic(err)
+    }
+}()
+
+// 3) Wait for job results to get SCN IDs (helper)
+ids, status, err := store.WaitJobResult(ctx, ns, jobID, 250*time.Millisecond)
+if err != nil { panic(err) }
+if status != "done" || len(ids) == 0 { panic("job did not complete or no SCN IDs returned") }
+
+// 4) Remove by SCN later
+if _, err := store.EnqueueRemoves(ctx, []string{ids[0]}, vectorstores.WithNameSpace(ns)); err != nil {
+    panic(err)
+}
+```
+
+Notes:
+- Readers opened with `WithReadOnly(true)` avoid taking `writer.lock` and can tail the journal via `WithTailInterval`.
+- `.tr2` (v3) stores `snapshotSCN` and IDs; readers only replay events with `SCN > snapshotSCN`.
+
+### Writer Lease & Tuning
+
+- Lease TTL:
+  - Configure default via `mem.WithWriterLeaseTTL(15 * time.Second)` on the Store.
+  - Override default via `mem.WithWriterLeaseTTL(10 * time.Second)` on the Store.
+  - Writer renews heartbeat periodically; if lost, it releases and exits so another process can take over.
+
+- Logs/metrics:
+  - Writer logs lease acquisition, release, and loss events (namespace, owner, TTL).
+  - You can wrap `RunNamespaceWriter` in your own service for metrics export.
+
+
+#### Configuring Persistence
+
+- Enable persistence with external values and default segment size:
+
+```go
+vectorDb := mem.NewStore(
+    mem.WithBaseURL(baseURL),             // enables persistence
+    mem.WithExternalValues(true),         // use mmap-backed ValueStore by default
+)
+```
+
+- Tune segment size and writer lock behavior:
+
+```go
+vectorDb := mem.NewStore(
+    mem.WithBaseURL(baseURL),
+    mem.WithExternalValues(true),
+    mem.WithSegmentSize(512<<20),         // 512 MiB segments
+    mem.WithWriterLock(true, 5*time.Second), // block up to 5s to acquire per-namespace lock
+)
+```
+
+- Per-Set overrides:
+
+```go
+set, _ := mem.NewSet(ctx, baseURL, namespace,
+    mem.WithSetExternalValues(true),
+    mem.WithSetSegmentSize(256<<20), // 256 MiB
+    mem.WithSetWriterLock(true, 0),  // block indefinitely
+)
+```
+
+- Graceful shutdown:
+
+```go
+// Flushes .tr2 and segment manifests, closes mmaps and releases writer.lock
+_ = vectorDb.Persist(ctx)
+_ = vectorDb.(*mem.Store).Close()
+```
+
+Notes:
+- Upstream synchronization copies `cache_<ns>.json`, `index_<ns>.tr2`, and files under `data/<ns>/` except `writer.lock`.
+- `.tr2` writes use temp file + rename and fsync the parent dir to improve durability on supported filesystems.
+
 ### Indexer
 
 The indexer processes content to create searchable documents:
@@ -157,7 +301,7 @@ package main
 
 import (
         "context"
-        "github.com/tmc/langchaingo/embeddings"
+        "github.com/viant/embedius/embeddings"
         "github.com/viant/embedius/indexer"
         "github.com/viant/embedius/indexer/fs"
         "github.com/viant/embedius/indexer/fs/matching"
@@ -230,4 +374,3 @@ all compatible with Apache License, Version 2. Please see individual files for d
 ## Credits
 
 Developed and maintained by [Viant](https://github.com/viant).
-

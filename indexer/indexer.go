@@ -2,9 +2,9 @@ package indexer
 
 import (
 	"context"
-	"github.com/tmc/langchaingo/schema"
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/indexer/cache"
+	"github.com/viant/embedius/schema"
 )
 
 // Indexer represents an interface for indexing content

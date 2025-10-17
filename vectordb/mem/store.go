@@ -2,16 +2,20 @@ package mem
 
 import (
 	"context"
-	"github.com/tmc/langchaingo/schema"
-	"github.com/tmc/langchaingo/vectorstores"
+	"github.com/viant/embedius/schema"
+	"github.com/viant/embedius/vectorstores"
 	"sync"
+	"time"
 )
 
 const defaultSetID = "default"
 
 type Store struct {
-	baseURL string
-	sets    map[string]*Set
+	baseURL        string
+	sets           map[string]*Set
+	setOptions     []SetOption
+	writerLeaseTTL time.Duration
+	writerMetrics  WriterMetrics
 	sync.RWMutex
 }
 
@@ -26,6 +30,12 @@ func (s *Store) Persist(ctx context.Context) error {
 	for _, set := range sets {
 		if err := set.persist(ctx); err != nil {
 			return err
+		}
+		// Ensure value store data/manifest are flushed
+		if set.values != nil {
+			if err := set.values.Sync(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -66,7 +76,7 @@ func (s *Store) getSet(ctx context.Context, opts []vectorstores.Option) (*Set, e
 	defer s.RWMutex.Unlock()
 	set, ok := s.sets[setName]
 	if !ok {
-		if set, err = NewSet(ctx, s.baseURL, setName); err != nil {
+		if set, err = NewSet(ctx, s.baseURL, setName, s.setOptions...); err != nil {
 			return nil, err
 		}
 		s.sets[setName] = set
@@ -94,4 +104,21 @@ func NewStore(options ...StoreOption) *Store {
 		opt(ret)
 	}
 	return ret
+}
+
+// Close closes all underlying ValueStores.
+func (s *Store) Close() error {
+	s.RWMutex.RLock()
+	sets := make([]*Set, 0, len(s.sets))
+	for _, st := range s.sets {
+		sets = append(sets, st)
+	}
+	s.RWMutex.RUnlock()
+	var firstErr error
+	for _, set := range sets {
+		if err := set.close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

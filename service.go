@@ -2,9 +2,9 @@ package retriever
 
 import (
 	"context"
-	"github.com/tmc/langchaingo/schema"
-	"github.com/tmc/langchaingo/vectorstores"
 	"github.com/viant/embedius/indexer"
+	"github.com/viant/embedius/schema"
+	"github.com/viant/embedius/vectorstores"
 )
 
 // Service is a retriever service

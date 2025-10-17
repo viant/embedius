@@ -1,11 +1,9 @@
 package vectordb
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"github.com/tmc/langchaingo/schema"
 	"github.com/viant/bintly"
+	"github.com/viant/embedius/schema"
 	"time"
 )
 
@@ -122,13 +120,7 @@ func (d *Document) DecodeBinary(stream *bintly.Reader) error {
 }
 
 func (d *Document) Content() ([]string, error) {
-	buffer := bytes.Buffer{}
-	data, err := json.Marshal(d.Metadata)
-	if err != nil {
-		return nil, err
-	}
-	buffer.WriteString(string(data))
-	buffer.WriteString(d.PageContent)
-	item := string(buffer.Bytes())
-	return []string{item}, nil
+	// For embedding, use only the page content. Metadata is not part of the
+	// embedding text to avoid coupling embeddings to non-semantic keys.
+	return []string{d.PageContent}, nil
 }

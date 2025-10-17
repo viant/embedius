@@ -3,8 +3,8 @@ package indexer
 import (
 	"context"
 	"fmt"
-	"github.com/tmc/langchaingo/embeddings"
 	"github.com/viant/afs"
+	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/vectordb"
 	"sync"
 )

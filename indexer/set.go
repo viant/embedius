@@ -4,16 +4,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/tmc/langchaingo/embeddings"
-	"github.com/tmc/langchaingo/schema"
-	"github.com/tmc/langchaingo/vectorstores"
 	"github.com/viant/afs"
 	"github.com/viant/afs/file"
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/document"
+	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/indexer/cache"
+	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb"
 	"github.com/viant/embedius/vectordb/meta"
+	"github.com/viant/embedius/vectorstores"
 	"strings"
 )
 
@@ -182,13 +182,11 @@ func (s *Set) handleUpstreamSync(ctx context.Context) error {
 
 	var sourceURL = []string{
 		upstream.URL(),
-		strings.Replace(strings.Replace(upstream.URL(), ".json", ".dat", 1), "cache_", "index_", 1),
-		strings.Replace(strings.Replace(upstream.URL(), ".json", ".tre", 1), "cache_", "index_", 1),
+		strings.Replace(strings.Replace(upstream.URL(), ".json", ".tr2", 1), "cache_", "index_", 1),
 	}
 	var destURL = []string{
 		downstream.URL(),
-		strings.Replace(strings.Replace(downstream.URL(), ".json", ".dat", 1), "cache_", "index_", 1),
-		strings.Replace(strings.Replace(downstream.URL(), ".json", ".tre", 1), "cache_", "index_", 1),
+		strings.Replace(strings.Replace(downstream.URL(), ".json", ".tr2", 1), "cache_", "index_", 1),
 	}
 
 	var dataByURL = map[string][]byte{}
@@ -199,9 +197,65 @@ func (s *Set) handleUpstreamSync(ctx context.Context) error {
 		}
 		dataByURL[URL] = data
 	}
+	type mover interface {
+		Move(context.Context, string, string) error
+	}
+	mv, hasMove := any(s.fs).(mover)
 	for i, URL := range sourceURL {
-		if err := s.fs.Upload(ctx, destURL[i], file.DefaultFileOsMode, bytes.NewReader(dataByURL[URL])); err != nil {
-			return fmt.Errorf("failed to upload asset: %w", err) //this is critical as partial data might be uploaded
+		final := destURL[i]
+		tmp := final + ".tmp"
+		// Upload to temp first
+		if err := s.fs.Upload(ctx, tmp, file.DefaultFileOsMode, bytes.NewReader(dataByURL[URL])); err != nil {
+			return fmt.Errorf("failed to upload temp asset: %w", err)
+		}
+		// Try server-side move if supported
+		if hasMove {
+			if err := mv.Move(ctx, tmp, final); err != nil {
+				// Fallback: re-upload directly to final, then delete temp
+				if err2 := s.fs.Upload(ctx, final, file.DefaultFileOsMode, bytes.NewReader(dataByURL[URL])); err2 != nil {
+					_ = s.fs.Delete(ctx, tmp)
+					return fmt.Errorf("failed to move asset and upload fallback: %v / %v", err, err2)
+				}
+				_ = s.fs.Delete(ctx, tmp)
+			}
+		} else {
+			// Fallback: re-upload directly to final, then delete temp
+			if err := s.fs.Upload(ctx, final, file.DefaultFileOsMode, bytes.NewReader(dataByURL[URL])); err != nil {
+				_ = s.fs.Delete(ctx, tmp)
+				return fmt.Errorf("failed atomic fallback upload: %w", err)
+			}
+			_ = s.fs.Delete(ctx, tmp)
+		}
+	}
+	// Remove legacy files at destination to avoid confusion alongside .tr2
+	legacyTre := strings.Replace(strings.Replace(downstream.URL(), ".json", ".tre", 1), "cache_", "index_", 1)
+	legacyDat := strings.Replace(strings.Replace(downstream.URL(), ".json", ".dat", 1), "cache_", "index_", 1)
+	if exists, _ := s.fs.Exists(ctx, legacyTre); exists {
+		_ = s.fs.Delete(ctx, legacyTre)
+	}
+	if exists, _ := s.fs.Exists(ctx, legacyDat); exists {
+		_ = s.fs.Delete(ctx, legacyDat)
+	}
+	// Sync mmap-backed data files under data/<namespace>
+	upstreamDataDir := url.Join(s.upstreamURL, fmt.Sprintf("data/%s", s.namespace))
+	downstreamDataDir := url.Join(s.baseURL, fmt.Sprintf("data/%s", s.namespace))
+	objects, _ := s.fs.List(ctx, upstreamDataDir)
+	for _, object := range objects {
+		// Only copy regular files (manifest.json, data_*.vdat)
+		if object.IsDir() {
+			continue
+		}
+		relName := strings.TrimPrefix(object.URL(), upstreamDataDir+"/")
+		if relName == "writer.lock" {
+			continue // never copy lock files
+		}
+		target := url.Join(downstreamDataDir, relName)
+		data, err := s.fs.DownloadWithURL(ctx, object.URL())
+		if err != nil {
+			continue
+		}
+		if err := s.fs.Upload(ctx, target, file.DefaultFileOsMode, bytes.NewReader(data)); err != nil {
+			return fmt.Errorf("failed to sync data file %s: %w", relName, err)
 		}
 	}
 	return nil

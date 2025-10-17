@@ -2,7 +2,7 @@ package document
 
 import (
 	"fmt"
-	"github.com/tmc/langchaingo/schema"
+	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb/meta"
 )
 
