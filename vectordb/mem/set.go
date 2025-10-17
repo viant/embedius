@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +21,7 @@ import (
 	vstorage "github.com/viant/embedius/vectordb/storage"
 	"github.com/viant/embedius/vectordb/storage/memstore"
 	"github.com/viant/embedius/vectordb/storage/mmapstore"
+	"github.com/viant/gds/tree/cover"
 	"golang.org/x/sys/unix"
 )
 
@@ -69,6 +69,11 @@ type Set struct {
 	snapshotSCN uint64
 	id2idx      map[string]int
 
+	// cover tree index for kNN
+	coverBase float32
+	coverDist cover.DistanceFunction
+	tree      *cover.Tree[int]
+
 	// tailer
 	tailInterval time.Duration
 	tailCancel   context.CancelFunc
@@ -79,8 +84,10 @@ type Set struct {
 // it defaults to an in-memory ValueStore for Phase 2 wiring.
 func NewSet(ctx context.Context, baseURL string, name string, opts ...SetOption) (*Set, error) {
 	s := &Set{
-		name:    name,
-		baseURL: baseURL,
+		name:      name,
+		baseURL:   baseURL,
+		coverBase: 1.3,
+		coverDist: cover.DistanceFunctionCosine,
 	}
 	// default: enable external values if baseURL provided
 	if baseURL != "" {
@@ -168,11 +175,48 @@ func NewSet(ctx context.Context, baseURL string, name string, opts ...SetOption)
 	}
 	// Apply any journaled changes (best-effort)
 	s.syncFromJournal(ctx)
+
+	// Initialize cover tree and (re)build from in-memory vectors
+	if s.coverBase <= 0 {
+		s.coverBase = 1.3
+	}
+	if s.coverDist == "" {
+		s.coverDist = cover.DistanceFunctionCosine
+	}
+	s.tree = cover.NewTree[int](s.coverBase, s.coverDist)
+	// Use level-bound strategy to avoid per-node radius writes during concurrent queries
+	s.tree.SetBoundStrategy(cover.BoundLevel)
+	s.rebuildCoverIndex()
 	// Start background tailer if configured
 	if s.tailInterval > 0 {
 		s.startTailer()
 	}
 	return s, nil
+}
+
+// rebuildCoverIndex rebuilds the cover tree from all alive vectors.
+func (s *Set) rebuildCoverIndex() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.tree == nil {
+		return
+	}
+	// Recreate the tree to avoid stale entries
+	base := s.coverBase
+	dist := s.coverDist
+	s.tree = cover.NewTree[int](base, dist)
+	s.tree.SetBoundStrategy(cover.BoundLevel)
+	for i := range s.vectors {
+		if i >= len(s.alive) || !s.alive[i] {
+			continue
+		}
+		vec := s.vectors[i]
+		if len(vec) == 0 {
+			continue
+		}
+		pt := cover.NewPoint(vec...)
+		_ = s.tree.Insert(i, pt)
+	}
 }
 
 // persist writes the set state in v3 layout: snapshotSCN + vectors + Ptrs + IDs.
@@ -459,6 +503,11 @@ func (s *Set) syncFromJournal(ctx context.Context) {
 				s.id2idx = map[string]int{}
 			}
 			s.id2idx[r.Ev.ID] = len(s.vectors) - 1
+			// update cover index if enabled
+			if s.tree != nil && len(r.Ev.Vec) > 0 {
+				pt := cover.NewPoint(r.Ev.Vec...)
+				_ = s.tree.Insert(len(s.vectors)-1, pt)
+			}
 			s.mu.Unlock()
 		case "remove":
 			s.mu.Lock()
@@ -675,12 +724,18 @@ func (s *Set) AddDocuments(ctx context.Context, docs []schema.Document, opts ...
 		s.ptrs = append(s.ptrs, ptr)
 		s.vectors = append(s.vectors, vecs[i])
 		s.alive = append(s.alive, true)
-		ids[i] = strconv.Itoa(len(s.ptrs) - 1)
+		newIdx := len(s.ptrs) - 1
+		ids[i] = strconv.Itoa(newIdx)
+		// update cover index if enabled
+		if s.tree != nil && len(vecs[i]) > 0 {
+			pt := cover.NewPoint(vecs[i]...)
+			_ = s.tree.Insert(newIdx, pt)
+		}
 	}
 	return ids, nil
 }
 
-// SimilaritySearch queries the set using cosine similarity over in-memory vectors
+// SimilaritySearch queries the set using the cover-tree index (kNN)
 // and materializes only the top-K documents via the ValueStore.
 func (s *Set) SimilaritySearch(ctx context.Context, query string, k int, opts ...vectorstores.Option) ([]schema.Document, error) {
 	options := vectorstores.Options{}
@@ -695,43 +750,53 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, k int, opts ..
 		return nil, err
 	}
 
-	// Score all items
-	s.mu.RLock()
-	type scored struct {
-		idx   int
-		score float32
+	// Cover-tree only path
+	if s.tree == nil {
+		return nil, fmt.Errorf("cover index not initialized")
 	}
-	sc := make([]scored, 0, len(s.vectors))
-	for i := range s.vectors {
-		if i >= len(s.alive) || !s.alive[i] {
+	pt := cover.NewPoint(qvec...)
+	// Over-fetch to account for filtered (dead) entries
+	candK := k
+	if candK < 32 {
+		candK = k * 2
+	}
+	// Prefer best-first if available in current gds; attempt via type assertion
+	// Note: our imported Tree exposes BestFirst in newer versions; call if present.
+	neighbors := s.tree.KNearestNeighbors(pt, candK)
+	indices := make([]int, 0, k)
+	scores := make([]float32, 0, k)
+	s.mu.RLock()
+	for _, n := range neighbors {
+		idx := s.tree.Value(n.Point)
+		if idx < 0 || idx >= len(s.alive) {
 			continue
 		}
-		if len(s.vectors[i]) == 0 {
+		if !s.alive[idx] {
 			continue
 		}
-		score := cosine(qvec, s.vectors[i])
-		sc = append(sc, scored{idx: i, score: score})
+		indices = append(indices, idx)
+		var sim float32
+		if s.coverDist == cover.DistanceFunctionCosine {
+			sim = 1 - n.Distance
+		} else {
+			sim = -n.Distance
+		}
+		scores = append(scores, sim)
+		if len(indices) == k {
+			break
+		}
 	}
 	s.mu.RUnlock()
+	return s.materializeTop(ctx, indices, scores)
+}
 
-	if len(sc) == 0 || k <= 0 {
-		return []schema.Document{}, nil
-	}
-
-	// Top-K
-	if k > len(sc) {
-		k = len(sc)
-	}
-	sort.Slice(sc, func(i, j int) bool { return sc[i].score > sc[j].score })
-	top := sc[:k]
-
-	// Materialize
-	results := make([]schema.Document, 0, k)
-	for _, it := range top {
+// materializeTop fetches documents by indices and assigns their scores.
+func (s *Set) materializeTop(ctx context.Context, indices []int, scores []float32) ([]schema.Document, error) {
+	results := make([]schema.Document, 0, len(indices))
+	for i, idx := range indices {
 		s.mu.RLock()
-		ptr := s.ptrs[it.idx]
+		ptr := s.ptrs[idx]
 		s.mu.RUnlock()
-
 		bs, err := s.values.Read(ptr)
 		if err != nil {
 			return nil, err
@@ -746,7 +811,9 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, k int, opts ..
 		}
 		readers.Put(r)
 		doc := schema.Document(vdoc)
-		doc.Score = it.score
+		if i < len(scores) {
+			doc.Score = scores[i]
+		}
 		results = append(results, doc)
 	}
 	return results, nil
@@ -769,25 +836,11 @@ func (s *Set) Remove(ctx context.Context, id string, _ ...vectorstores.Option) e
 	// best-effort tombstone; ignore error to keep in-memory state consistent
 	_ = s.values.Delete(s.ptrs[idx])
 	s.alive[idx] = false
+	// keep cover index consistent when enabled (best-effort)
+	if s.tree != nil {
+		if pt := s.tree.FindPointByIndex(int32(idx)); pt != nil {
+			_ = s.tree.Remove(pt)
+		}
+	}
 	return nil
-}
-
-// cosine computes cosine similarity between two float32 vectors.
-func cosine(a, b []float32) float32 {
-	if len(a) == 0 || len(b) == 0 || len(a) != len(b) {
-		return 0
-	}
-	var dot, na, nb float64
-	for i := range a {
-		av := float64(a[i])
-		bv := float64(b[i])
-		dot += av * bv
-		na += av * av
-		nb += bv * bv
-	}
-	denom := math.Sqrt(na) * math.Sqrt(nb)
-	if denom == 0 {
-		return 0
-	}
-	return float32(dot / denom)
 }

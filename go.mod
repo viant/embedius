@@ -10,11 +10,13 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/viant/afs v1.25.1
 	github.com/viant/bintly v0.2.0
-	github.com/viant/gds v0.4.5
+	github.com/viant/gds v0.5.0
 	github.com/viant/scy v0.15.4
 	golang.org/x/sys v0.35.0
 	modernc.org/sqlite v1.18.1
 )
+
+replace github.com/viant/gds => ../gds
 
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect

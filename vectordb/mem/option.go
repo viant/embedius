@@ -2,6 +2,7 @@ package mem
 
 import (
 	vstorage "github.com/viant/embedius/vectordb/storage"
+	"github.com/viant/gds/tree/cover"
 	"time"
 )
 
@@ -159,6 +160,22 @@ func WithTailInterval(d time.Duration) StoreOption {
 
 // WithSetTailInterval sets the background journal tail interval for a specific Set.
 func WithSetTailInterval(d time.Duration) SetOption { return func(s *Set) { s.tailInterval = d } }
+
+// WithCoverIndex enables an in-memory cover tree index for kNN and sets its parameters.
+// base controls tree granularity (>1, typical ~1.2–1.5). distance selects the metric.
+func WithCoverIndex(base float32, distance cover.DistanceFunction) SetOption {
+	return func(s *Set) {
+		s.coverBase = base
+		s.coverDist = distance
+	}
+}
+
+// WithSetCoverIndex enables the cover index for all newly created Sets in a Store.
+func WithSetCoverIndex(base float32, distance cover.DistanceFunction) StoreOption {
+	return func(s *Store) {
+		s.setOptions = append(s.setOptions, WithCoverIndex(base, distance))
+	}
+}
 
 // WithWriterLeaseTTL configures the default writer lease TTL at the Store level.
 func WithWriterLeaseTTL(d time.Duration) StoreOption {
