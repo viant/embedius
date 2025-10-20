@@ -232,6 +232,7 @@ func (s *Set) persist(ctx context.Context) error {
 	s.mu.RUnlock()
 
 	path := filepath.Join(s.baseURL, fmt.Sprintf("index_%s.tr2", s.name))
+	fmt.Printf("[embedius] mem.Set.persist: baseURL=%s name=%s vectors=%d path=%s\n", s.baseURL, s.name, len(vectors), path)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

@@ -1,5 +1,4 @@
-//go:build sqlite
-// +build sqlite
+// Default: enabled (pure-Go SQLite). To disable, build with -tags no_sqlite.
 
 package sqlite
 

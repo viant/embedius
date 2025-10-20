@@ -31,6 +31,7 @@ func (s *Service) Add(ctx context.Context, location string) (*Set, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get vector set URI: %w", err)
 	}
+	fmt.Printf("[embedius] indexer.Add: baseURL=%s namespace=%s location=%s\n", s.baseURL, namespace, location)
 	s.mux.Lock()
 	set, exists := s.sets[namespace]
 	if !exists {
@@ -41,12 +42,14 @@ func (s *Service) Add(ctx context.Context, location string) (*Set, error) {
 			return nil, fmt.Errorf("failed to create set: %w", err)
 		}
 		s.sets[namespace] = set
+		fmt.Printf("[embedius] indexer.Add: created new set for namespace=%s\n", namespace)
 	}
 	s.mux.Unlock()
 	// Index the content
 	if err = set.Index(ctx, location); err != nil {
 		return nil, fmt.Errorf("failed to index content: %w", err)
 	}
+	fmt.Printf("[embedius] indexer.Add: indexed location=%s\n", location)
 	return set, nil
 }
 

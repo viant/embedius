@@ -11,8 +11,10 @@ import (
 	"github.com/viant/embedius/matching"
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb/meta"
+	neturl "net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Indexer implements indexing for filesystem resources
@@ -60,7 +62,42 @@ func (i *Indexer) Namespace(ctx context.Context, URI string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to hash URI %v: %v", URI, err)
 	}
-	return strconv.Itoa(int(embeddingsHash)) + "_" + strconv.Itoa(int(uriHash)), nil
+	// Optional MCP server prefix for readability when URI is mcp: or mcp://
+	prefix := ""
+	if strings.HasPrefix(URI, "mcp://") {
+		if u, err := neturl.Parse(URI); err == nil {
+			if host := strings.TrimSpace(u.Host); host != "" {
+				prefix = "mcp_" + sanitize(host) + "_"
+			}
+		}
+	} else if strings.HasPrefix(URI, "mcp:") {
+		raw := strings.TrimPrefix(URI, "mcp:")
+		server := raw
+		if i := strings.IndexByte(raw, ':'); i != -1 {
+			server = raw[:i]
+		} else if j := strings.IndexByte(raw, '/'); j != -1 {
+			server = raw[:j]
+		}
+		server = strings.TrimSpace(server)
+		if server != "" {
+			prefix = "mcp_" + sanitize(server) + "_"
+		}
+	}
+	// Avoid negative numbers by using unsigned formatting
+	return prefix + strconv.FormatUint(embeddingsHash, 10) + "_" + strconv.FormatUint(uriHash, 10), nil
+}
+
+// sanitize converts server names to a filesystem-friendly token
+func sanitize(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			out = append(out, r)
+		} else {
+			out = append(out, '_')
+		}
+	}
+	return string(out)
 }
 
 // Index indexes content from the filesystem
