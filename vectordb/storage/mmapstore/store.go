@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/viant/embedius/vectordb/storage"
-	"golang.org/x/sys/unix"
 )
 
 // Implementation notes
@@ -37,25 +36,7 @@ type Options struct {
 	SegmentSize int64
 }
 
-// remap maps the segment file into memory read-only. If mapping fails, it is a no-op.
-func (seg *segment) remap() error {
-	// unmap previous mapping
-	if seg.data != nil {
-		_ = unix.Munmap(seg.data)
-		seg.data = nil
-	}
-	if seg.size == 0 {
-		return nil
-	}
-	// Map read-only, private; note that writes go via file APIs; mapping is used only for reads.
-	b, err := unix.Mmap(int(seg.f.Fd()), 0, int(seg.size), unix.PROT_READ, unix.MAP_SHARED)
-	if err != nil {
-		// ignore mapping errors; fallback path will use ReadAt
-		return nil
-	}
-	seg.data = b
-	return nil
-}
+// remap is implemented in OS-specific files.
 
 // read returns the payload bytes by either reading from mmap view (if available)
 // or falling back to direct file I/O.
@@ -526,10 +507,7 @@ func (s *Store) Close() error {
 				firstErr = err
 			}
 		}
-		if seg.data != nil {
-			_ = unix.Munmap(seg.data)
-			seg.data = nil
-		}
+		seg.unmap()
 	}
 	return firstErr
 }
