@@ -22,7 +22,6 @@ import (
 	"github.com/viant/embedius/vectordb/storage/memstore"
 	"github.com/viant/embedius/vectordb/storage/mmapstore"
 	"github.com/viant/gds/tree/cover"
-	"golang.org/x/sys/unix"
 )
 
 // Set is an in-memory vector set that stores vectors in RAM and keeps
@@ -125,32 +124,38 @@ func NewSet(ctx context.Context, baseURL string, name string, opts ...SetOption)
 				}
 				if s.lockBlocking {
 					if s.lockTimeout <= 0 {
-						if err := unix.Flock(int(lf.Fd()), unix.LOCK_EX); err != nil {
+						if err := lockExclusiveBlocking(lf); err != nil {
 							_ = lf.Close()
 							return nil, fmt.Errorf("namespace '%s' lock failed: %v", name, err)
 						}
 					} else {
 						deadline := time.Now().Add(s.lockTimeout)
 						for {
-							if err := unix.Flock(int(lf.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-								if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-									if time.Now().After(deadline) {
-										_ = lf.Close()
-										return nil, fmt.Errorf("%w: %s (after %s)", ErrNamespaceLockTimeout, name, s.lockTimeout)
-									}
-									time.Sleep(50 * time.Millisecond)
-									continue
-								}
-								_ = lf.Close()
-								return nil, fmt.Errorf("namespace '%s' lock failed: %v", name, err)
+							err := tryLockExclusive(lf)
+							if err == nil {
+								break
 							}
-							break
+							if errors.Is(err, errWouldBlock) {
+								if time.Now().After(deadline) {
+									_ = lf.Close()
+									return nil, fmt.Errorf("%w: %s (after %s)", ErrNamespaceLockTimeout, name, s.lockTimeout)
+								}
+								time.Sleep(50 * time.Millisecond)
+								continue
+							}
+							_ = lf.Close()
+							return nil, fmt.Errorf("namespace '%s' lock failed: %v", name, err)
 						}
 					}
 				} else {
-					if err := unix.Flock(int(lf.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+					err := tryLockExclusive(lf)
+					if errors.Is(err, errWouldBlock) {
 						_ = lf.Close()
 						return nil, fmt.Errorf("%w: %s", ErrNamespaceLocked, name)
+					}
+					if err != nil {
+						_ = lf.Close()
+						return nil, fmt.Errorf("namespace '%s' lock failed: %v", name, err)
 					}
 				}
 				s.lockFile = lf
@@ -588,7 +593,7 @@ func (s *Set) close() error {
 	}
 	if s.lockFile != nil {
 		// unlocking is best-effort; closing also releases the lock
-		_ = unix.Flock(int(s.lockFile.Fd()), unix.LOCK_UN)
+		_ = unlockFile(s.lockFile)
 		if err := s.lockFile.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
