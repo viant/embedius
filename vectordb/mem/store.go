@@ -2,7 +2,6 @@ package mem
 
 import (
 	"context"
-	"fmt"
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectorstores"
 	"sync"
@@ -55,7 +54,7 @@ func (s *Store) SimilaritySearch(ctx context.Context, query string, numDocuments
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("[embedius] mem.Store.SimilaritySearch: baseURL=%s set=%s query=%q k=%d\n", s.baseURL, s.getSetName(opts), query, numDocuments)
+
 	return set.SimilaritySearch(ctx, query, numDocuments, opts...)
 }
 
