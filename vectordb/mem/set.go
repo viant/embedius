@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectorstores"
@@ -77,6 +78,54 @@ type Set struct {
 	tailInterval time.Duration
 	tailCancel   context.CancelFunc
 	tailWG       sync.WaitGroup
+}
+
+// splitQueryWindows splits s into UTF-8 safe overlapping windows.
+// maxBytes defines window size; overlap defines byte overlap between consecutive windows.
+func splitQueryWindows(s string, maxBytes, overlap int) []string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return []string{s}
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	if overlap >= maxBytes {
+		overlap = maxBytes / 4 // clamp to a sane value
+	}
+	step := maxBytes - overlap
+	if step <= 0 {
+		step = maxBytes
+	}
+	b := []byte(s)
+	var out []string
+	for start := 0; start < len(b); start += step {
+		// ensure start at rune boundary
+		for start < len(b) && !utf8.RuneStart(b[start]) {
+			start++
+		}
+		if start >= len(b) {
+			break
+		}
+		end := start + maxBytes
+		if end > len(b) {
+			end = len(b)
+		}
+		// move end back to rune boundary
+		for end > start && !utf8.RuneStart(b[end]) {
+			end--
+		}
+		if end <= start {
+			break
+		}
+		out = append(out, string(b[start:end]))
+		if end == len(b) {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{s}
+	}
+	return out
 }
 
 // NewSet creates a new in-memory Set. If no ValueStore was injected via options,
@@ -750,14 +799,100 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, k int, opts ..
 	if options.Embedder == nil {
 		return nil, fmt.Errorf("embedder is required")
 	}
-	qvec, err := options.Embedder.EmbedQuery(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
 	// Cover-tree only path
 	if s.tree == nil {
 		return nil, fmt.Errorf("cover index not initialized")
+	}
+
+	// Optional query splitting for long queries.
+	if options.MaxQueryBytes > 0 && len(query) > options.MaxQueryBytes {
+		windows := splitQueryWindows(query, options.MaxQueryBytes, options.QueryOverlap)
+		if len(windows) == 0 {
+			windows = []string{query}
+		}
+		vecs, err := options.Embedder.EmbedDocuments(ctx, windows)
+		if err != nil {
+			// Fallback to single-vector embedding
+			qvec, e2 := options.Embedder.EmbedQuery(ctx, query)
+			if e2 != nil {
+				return nil, err
+			}
+			vecs = [][]float32{qvec}
+		}
+		// Aggregate scores across windows (max by default; mean if requested).
+		type agg struct {
+			sum   float32
+			count int
+			max   float32
+		}
+		acc := map[int]*agg{}
+		candK := k
+		if candK < 32 {
+			candK = k * 2
+		}
+		for _, qv := range vecs {
+			if len(qv) == 0 {
+				continue
+			}
+			pt := cover.NewPoint(qv...)
+			neighbors := s.tree.KNearestNeighbors(pt, candK)
+			s.mu.RLock()
+			for _, n := range neighbors {
+				idx := s.tree.Value(n.Point)
+				if idx < 0 || idx >= len(s.alive) || !s.alive[idx] {
+					continue
+				}
+				var sim float32
+				if s.coverDist == cover.DistanceFunctionCosine {
+					sim = 1 - n.Distance
+				} else {
+					sim = -n.Distance
+				}
+				a := acc[idx]
+				if a == nil {
+					a = &agg{max: sim}
+					acc[idx] = a
+				}
+				a.sum += sim
+				a.count++
+				if sim > a.max {
+					a.max = sim
+				}
+			}
+			s.mu.RUnlock()
+		}
+		type pair struct {
+			idx   int
+			score float32
+		}
+		pairs := make([]pair, 0, len(acc))
+		useMean := options.QueryAggregator == "mean"
+		for idx, a := range acc {
+			var sc float32
+			if useMean && a.count > 0 {
+				sc = a.sum / float32(a.count)
+			} else {
+				sc = a.max
+			}
+			pairs = append(pairs, pair{idx: idx, score: sc})
+		}
+		sort.Slice(pairs, func(i, j int) bool { return pairs[i].score > pairs[j].score })
+		if len(pairs) > k {
+			pairs = pairs[:k]
+		}
+		indices := make([]int, len(pairs))
+		scores := make([]float32, len(pairs))
+		for i := range pairs {
+			indices[i] = pairs[i].idx
+			scores[i] = pairs[i].score
+		}
+		return s.materializeTop(ctx, indices, scores)
+	}
+
+	// Default single-query path
+	qvec, err := options.Embedder.EmbedQuery(ctx, query)
+	if err != nil {
+		return nil, err
 	}
 	pt := cover.NewPoint(qvec...)
 	// Over-fetch to account for filtered (dead) entries
@@ -765,8 +900,6 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, k int, opts ..
 	if candK < 32 {
 		candK = k * 2
 	}
-	// Prefer best-first if available in current gds; attempt via type assertion
-	// Note: our imported Tree exposes BestFirst in newer versions; call if present.
 	neighbors := s.tree.KNearestNeighbors(pt, candK)
 	indices := make([]int, 0, k)
 	scores := make([]float32, 0, k)
