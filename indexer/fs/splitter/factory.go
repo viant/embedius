@@ -38,7 +38,9 @@ func NewFactory(defaultMaxSize int) *Factory {
 	factory := &Factory{
 		defaultSplitter:   NewSizeSplitter(defaultMaxSize),
 		extensionSplitter: make(map[string]Splitter),
-		sizeSplitter:      NewSizeSplitter(1024), // Smaller chunks for large files
+		// Keep large-file splitter consistent with the configured default chunk size
+		// (defaults to 4096 unless overridden by caller).
+		sizeSplitter: NewSizeSplitter(defaultMaxSize),
 	}
 
 	// Register specialized splitters for common file types
