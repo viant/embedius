@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/minio/highwayhash v1.0.3
 	github.com/stretchr/testify v1.10.0
-	github.com/viant/afs v1.25.1
+	github.com/viant/afs v1.27.0
 	github.com/viant/bintly v0.2.0
 	github.com/viant/gds v0.5.0
 	github.com/viant/scy v0.15.4

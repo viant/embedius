@@ -102,15 +102,22 @@ func sanitize(s string) string {
 
 // Index indexes content from the filesystem
 func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
-	path := location
-	if url.Scheme(location, "") == "" && url.IsRelative(location) {
+	// Normalize the incoming location for cross-platform AFS compatibility.
+	// - If relative with no scheme → make absolute OS path
+	// - If absolute OS path with no scheme (drive/UNC/POSIX) → convert to file:// URL
+	norm := location
+	if url.Scheme(norm, "") == "" && url.IsRelative(norm) {
 		var err error
-		path, err = filepath.Abs(location)
+		norm, err = filepath.Abs(norm)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get absolute path for %s: %w", location, err)
 		}
 	}
-	objects, err := i.fs.List(ctx, path)
+	if url.Scheme(norm, "") == "" && !url.IsRelative(norm) {
+		norm = url.ToFileURL(norm)
+	}
+
+	objects, err := i.fs.List(ctx, norm)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -130,7 +137,7 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 
 		if object.IsDir() {
 			// Recursively index subdirectories
-			subDocuments, subToRemove, err := i.Index(ctx, url.Join(location, name), cache)
+			subDocuments, subToRemove, err := i.Index(ctx, url.Join(norm, name), cache)
 			if err != nil {
 				return nil, nil, err
 			}
