@@ -107,8 +107,8 @@ func splitQueryWindows(s string, maxBytes, overlap int) []string {
 			break
 		}
 		end := start + maxBytes
-		if end > len(b) {
-			end = len(b)
+		if end >= len(b) {
+			end = len(b) - 1
 		}
 		// move end back to rune boundary
 		for end > start && !utf8.RuneStart(b[end]) {
