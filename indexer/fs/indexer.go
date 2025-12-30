@@ -3,6 +3,11 @@ package fs
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
+
 	"github.com/viant/afs/storage"
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/document"
@@ -11,10 +16,6 @@ import (
 	"github.com/viant/embedius/matching"
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb/meta"
-	neturl "net/url"
-	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 // Indexer implements indexing for filesystem resources
@@ -125,6 +126,12 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 	var toAddDocuments []schema.Document
 	var toRemove []string
 
+	baseNormalised := norm
+	if len(objects) > 0 {
+		scheme := url.SchemeExtensionURL(objects[0].URL())
+		baseNormalised = url.Normalize(norm, scheme)
+	}
+
 	for _, object := range objects {
 		objectPath := url.Path(object.URL())
 		if url.Equals(objectPath, location) && object.IsDir() {
@@ -136,6 +143,11 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 		name := object.Name()
 
 		if object.IsDir() {
+			oUrl := object.URL()
+			if baseNormalised == oUrl {
+				continue
+			}
+
 			// Recursively index subdirectories
 			subDocuments, subToRemove, err := i.Index(ctx, url.Join(norm, name), cache)
 			if err != nil {
