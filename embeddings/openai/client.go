@@ -199,6 +199,12 @@ func (e *Embedder) EmbedDocuments(ctx context.Context, docs []string) ([][]float
 	return v, err
 }
 
+// EmbedDocumentsWithUsage embeds documents and returns total token usage.
+func (e *Embedder) EmbedDocumentsWithUsage(ctx context.Context, docs []string) ([][]float32, int, error) {
+	v, tokens, err := e.C.Embed(ctx, docs)
+	return v, tokens, err
+}
+
 func (e *Embedder) EmbedQuery(ctx context.Context, q string) ([]float32, error) {
 	v, _, err := e.C.Embed(ctx, []string{q})
 	if err != nil {

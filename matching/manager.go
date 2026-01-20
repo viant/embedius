@@ -119,6 +119,21 @@ func (m *Manager) isIncluded(path string) bool {
 			return true
 		}
 
+		// Handle relative patterns with leading **/ (match anywhere in path)
+		if strings.HasPrefix(pattern, "**/") {
+			suffix := strings.TrimPrefix(pattern, "**/")
+			if matched, _ := filepath.Match(suffix, path); matched {
+				return true
+			}
+			base := filepath.Base(path)
+			if matched, _ := filepath.Match(suffix, base); matched {
+				return true
+			}
+			if strings.HasSuffix(path, suffix) || strings.Contains(path, "/"+suffix) {
+				return true
+			}
+		}
+
 		// Try filepath pattern matching for wildcard patterns
 		matched, err := filepath.Match(pattern, path)
 		if err == nil && matched {

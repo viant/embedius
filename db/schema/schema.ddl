@@ -1,0 +1,2 @@
+-- Embedius schema entrypoint
+-- See db/schema/sqlite/schema.ddl, db/schema/mysql/schema.ddl, and db/schema/bigquery/schema.ddl

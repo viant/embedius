@@ -6,6 +6,8 @@ import (
 	"github.com/viant/afs"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/vectordb"
+	"github.com/viant/embedius/vectordb/sqlitevec"
+	"path/filepath"
 	"sync"
 )
 
@@ -55,6 +57,21 @@ func (s *Service) Add(ctx context.Context, location string) (*Set, error) {
 
 // NewService creates a new storage service
 func NewService(baseURL string, vStore vectordb.VectorStore, embedder embeddings.Embedder, indexer Indexer) *Service {
+	if vStore == nil {
+		if baseURL == "" {
+			panic("baseURL is required when vStore is nil")
+		}
+		dbPath := filepath.Join(baseURL, "embedius.sqlite")
+		store, err := sqlitevec.NewStore(
+			sqlitevec.WithDSN(dbPath),
+			sqlitevec.WithEnsureSchema(true),
+		)
+		if err != nil {
+			panic(fmt.Sprintf("failed to create sqlitevec store: %v", err))
+		}
+		store.SetSCNAllocator(sqlitevec.DefaultSCNAllocator(store.DB()))
+		vStore = store
+	}
 	return &Service{
 		vStore:   vStore,
 		baseURL:  baseURL,

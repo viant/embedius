@@ -1,0 +1,93 @@
+init:
+  repoPath: $WorkingDirectory(..)
+
+pipeline:
+  init:
+    tempDir:
+      action: exec:extract
+      commands:
+        - command: mktemp -d
+          extract:
+            - Key: TempDir
+              RegExpr: (.*)
+
+    paths:
+      action: exec:extract
+      commands:
+        - command: echo "$TempDir/rootA"
+          extract:
+            - Key: RootDir
+              RegExpr: (.*)
+        - command: echo "$TempDir/embedius.sqlite"
+          extract:
+            - Key: DBPath
+              RegExpr: (.*)
+        - command: echo "$TempDir/upstream.sqlite"
+          extract:
+            - Key: UpPath
+              RegExpr: (.*)
+
+    files:
+      action: exec:run
+      checkError: true
+      commands:
+        - mkdir -p $RootDir
+        - echo 'hello world' > $RootDir/a.txt
+        - echo 'auth flow and permissions' > $RootDir/b.txt
+
+  index:
+    action: exec:run
+    checkError: true
+    commands:
+      - cd $repoPath
+      - if [ ! -x $TempDir/embedius ]; then go build -o $TempDir/embedius ./cmd/embedius; fi
+      - if [ ! -x $TempDir/seed_upstream ]; then go build -o $TempDir/seed_upstream ./e2e/seed_upstream.go; fi
+      - $TempDir/embedius index --db $DBPath --root rootA --path $RootDir --embedder simple
+
+  search:
+    action: exec:extract
+    checkError: true
+    commands:
+      - command: $TempDir/embedius search --db $DBPath --root rootA --query auth --embedder simple
+        timeoutMs: 60000
+
+  sync:
+    seed:
+      action: exec:run
+      checkError: true
+      commands:
+        - $TempDir/seed_upstream --db $UpPath --dataset rootA --id asset-x#0 --content 'upstream content' --path docs/u.txt --md5 deadbeef --scn 1
+    pull:
+      action: exec:run
+      checkError: true
+      commands:
+        - $TempDir/embedius sync --db $DBPath --root rootA --upstream-driver sqlite --upstream-dsn $UpPath
+    validate:
+      action: exec:extract
+      checkError: true
+      commands:
+        - command: $TempDir/embedius search --db $DBPath --root rootA --query upstream --embedder simple
+          timeoutMs: 60000
+
+  admin:
+    action: exec:extract
+    checkError: true
+    commands:
+      - command: $TempDir/embedius admin --db $DBPath --root rootA --action check
+        timeoutMs: 60000
+      - command: $TempDir/embedius admin --db $DBPath --root rootA --action prune --scn 1 --force
+        timeoutMs: 60000
+
+  include_exclude:
+    setup:
+      action: exec:run
+      checkError: true
+      commands:
+        - mkdir -p $TempDir/rootB
+        - echo 'package main' > $TempDir/rootB/keep.go
+        - echo 'ignore me' > $TempDir/rootB/skip.txt
+    run:
+      action: exec:run
+      checkError: true
+      commands:
+        - $TempDir/embedius index --db $DBPath --root rootB --path $TempDir/rootB --embedder simple --include '**/*.go'
