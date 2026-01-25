@@ -242,3 +242,20 @@ func TestSyncUpstream_FilterInsertUpdateOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestAssetFromMetaPrefersRelPath(t *testing.T) {
+	metaJSON := `{"asset_id":"a1","path":"mcp://github/org/repo/file.go","rel_path":"file.go","md5":"deadbeef"}`
+	assetID, relPath, md5hex := assetFromMeta(metaJSON, "doc1")
+	if assetID != "a1" || relPath != "file.go" || md5hex != "deadbeef" {
+		t.Fatalf("unexpected values: assetID=%q relPath=%q md5=%q", assetID, relPath, md5hex)
+	}
+}
+
+func TestNormalizeBytes_FromPointer(t *testing.T) {
+	src := []byte(`{"ok":true}`)
+	ptr := &src
+	got := normalizeBytes(ptr)
+	if string(got) != string(src) {
+		t.Fatalf("expected %q, got %q", string(src), string(got))
+	}
+}

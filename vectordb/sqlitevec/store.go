@@ -5,11 +5,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/viant/embedius/embeddings"
+	"github.com/viant/embedius/indexer/fs"
 	"github.com/viant/embedius/schema"
+	"github.com/viant/embedius/vectordb"
 	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/embedius/vectorstores"
 	"github.com/viant/sqlite-vec/engine"
@@ -34,6 +40,11 @@ type Store struct {
 	embedModel    string
 	scnAllocator  SCNAllocator
 	openedLocally bool
+	walEnabled    bool
+	busyTimeoutMS int
+	syncMu        sync.Mutex
+	syncLast      map[string]time.Time
+	syncInFlight  map[string]bool
 }
 
 // Option configures the sqlite-vec store.
@@ -74,6 +85,16 @@ func WithSCNAllocator(fn SCNAllocator) Option {
 	return func(s *Store) { s.scnAllocator = fn }
 }
 
+// WithWAL enables WAL journal mode for shared access.
+func WithWAL(enabled bool) Option {
+	return func(s *Store) { s.walEnabled = enabled }
+}
+
+// WithBusyTimeout sets the SQLite busy_timeout in milliseconds.
+func WithBusyTimeout(ms int) Option {
+	return func(s *Store) { s.busyTimeoutMS = ms }
+}
+
 // NewStore opens/initializes a sqlite-vec Store.
 func NewStore(opts ...Option) (*Store, error) {
 	s := &Store{
@@ -98,15 +119,29 @@ func NewStore(opts ...Option) (*Store, error) {
 			return nil, err
 		}
 		s.db = db
-		s.db.SetMaxOpenConns(4)
-		s.db.SetMaxIdleConns(4)
+		s.db.SetMaxOpenConns(10)
+		s.db.SetMaxIdleConns(10)
 		s.openedLocally = true
 	}
 	if err := vec.Register(s.db); err != nil {
 		return nil, err
 	}
+	if s.walEnabled {
+		if _, err := s.db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+			return nil, fmt.Errorf("sqlitevec: set WAL mode: %w", err)
+		}
+	}
+	if s.busyTimeoutMS > 0 {
+		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA busy_timeout=%d`, s.busyTimeoutMS)); err != nil {
+			return nil, fmt.Errorf("sqlitevec: set busy_timeout: %w", err)
+		}
+	}
+	checkMatchSupport(s.db)
 	if s.ensureSchema {
 		if err := s.ensureSchemaDDL(context.Background()); err != nil {
+			return nil, err
+		}
+		if err := s.verifySchema(context.Background()); err != nil {
 			return nil, err
 		}
 	}
@@ -123,6 +158,245 @@ func (s *Store) Close() error {
 
 // DB exposes the underlying sql.DB.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// ExistingAssetMD5s returns md5 hashes that already exist for the dataset.
+func (s *Store) ExistingAssetMD5s(ctx context.Context, dataset string, md5s []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if s == nil || s.db == nil || len(md5s) == 0 {
+		return out, nil
+	}
+	dedup := make(map[string]struct{}, len(md5s))
+	uniq := make([]string, 0, len(md5s))
+	for _, md5hex := range md5s {
+		md5hex = strings.TrimSpace(md5hex)
+		if md5hex == "" {
+			continue
+		}
+		if _, ok := dedup[md5hex]; ok {
+			continue
+		}
+		dedup[md5hex] = struct{}{}
+		uniq = append(uniq, md5hex)
+	}
+	if len(uniq) == 0 {
+		return out, nil
+	}
+	const batch = 500
+	for i := 0; i < len(uniq); i += batch {
+		end := i + batch
+		if end > len(uniq) {
+			end = len(uniq)
+		}
+		args := make([]any, 0, end-i+1)
+		args = append(args, dataset)
+		placeholders := make([]string, 0, end-i)
+		for _, md5hex := range uniq[i:end] {
+			args = append(args, md5hex)
+			placeholders = append(placeholders, "?")
+		}
+		query := fmt.Sprintf(`SELECT md5 FROM emb_asset WHERE dataset_id = ? AND archived = 0 AND md5 IN (%s)`, strings.Join(placeholders, ","))
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return out, err
+		}
+		for rows.Next() {
+			var md5hex string
+			if err := rows.Scan(&md5hex); err != nil {
+				_ = rows.Close()
+				return out, err
+			}
+			out[md5hex] = true
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return out, err
+		}
+		_ = rows.Close()
+	}
+	return out, nil
+}
+
+// AssetMD5s returns all md5 hashes for non-archived assets in the dataset.
+func (s *Store) AssetMD5s(ctx context.Context, dataset string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if s == nil || s.db == nil {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT md5 FROM emb_asset WHERE dataset_id = ? AND archived = 0`, dataset)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var md5hex string
+		if err := rows.Scan(&md5hex); err != nil {
+			return out, err
+		}
+		md5hex = strings.TrimSpace(md5hex)
+		if md5hex != "" {
+			out[md5hex] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+// AssetMetaByPath returns asset metadata keyed by path for non-archived assets.
+func (s *Store) AssetMetaByPath(ctx context.Context, dataset string) (map[string]fs.AssetMeta, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(dataset) == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT path, size, md5 FROM emb_asset WHERE dataset_id = ? AND archived = 0`, dataset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]fs.AssetMeta{}
+	for rows.Next() {
+		var path string
+		var size int64
+		var md5hex string
+		if err := rows.Scan(&path, &size, &md5hex); err != nil {
+			return nil, err
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		out[path] = fs.AssetMeta{Size: size, MD5: strings.TrimSpace(md5hex)}
+	}
+	return out, rows.Err()
+}
+
+// SyncUpstream synchronizes upstream changes into the local sqlitevec store.
+func (s *Store) SyncUpstream(ctx context.Context, cfg vectordb.UpstreamSyncConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if s == nil || s.db == nil {
+		return fmt.Errorf("sqlitevec: store not initialized")
+	}
+	if cfg.UpstreamDB == nil {
+		return fmt.Errorf("sqlitevec: upstream db is required")
+	}
+	dataset := strings.TrimSpace(cfg.DatasetID)
+	if dataset == "" {
+		dataset = defaultNamespace
+	}
+	shadow := strings.TrimSpace(cfg.Shadow)
+	if shadow == "" {
+		shadow = "shadow_vec_docs"
+	}
+	batch := cfg.BatchSize
+	if batch <= 0 {
+		batch = 200
+	}
+	localShadow := strings.TrimSpace(cfg.LocalShadow)
+	if localShadow == "" {
+		localShadow = s.shadow
+	}
+	assetTable := strings.TrimSpace(cfg.AssetTable)
+	if assetTable == "" {
+		assetTable = "emb_asset"
+	}
+	if cfg.Logf != nil {
+		cfg.Logf("embedius upstream sync start dataset=%q shadow=%q", dataset, shadow)
+	}
+	shouldRun, background := s.shouldRunSync(dataset, cfg.MinInterval, cfg.Background)
+	if !shouldRun {
+		return nil
+	}
+	runCtx := ctx
+	if background {
+		runCtx = context.Background()
+	}
+	run := func(runCtx context.Context) error {
+		err := SyncUpstream(runCtx, s.db, cfg.UpstreamDB, SyncConfig{
+			DatasetID:      dataset,
+			UpstreamShadow: shadow,
+			LocalShadow:    localShadow,
+			AssetTable:     assetTable,
+			BatchSize:      batch,
+			ForceSync:      cfg.Force,
+			Logf:           cfg.Logf,
+			Filter:         cfg.Filter,
+		})
+		s.markSyncComplete(dataset)
+		return err
+	}
+	if background {
+		go func() {
+			if err := run(runCtx); err != nil && cfg.Logf != nil {
+				cfg.Logf("embedius upstream sync failed dataset=%q err=%v", dataset, err)
+			} else if err == nil && cfg.Logf != nil {
+				cfg.Logf("embedius upstream sync done dataset=%q shadow=%q", dataset, shadow)
+			}
+		}()
+		return nil
+	}
+	err := run(runCtx)
+	if err != nil {
+		return err
+	}
+	if cfg.Logf != nil {
+		cfg.Logf("embedius upstream sync done dataset=%q shadow=%q", dataset, shadow)
+	}
+	return nil
+}
+
+func (s *Store) shouldRunSync(dataset string, minInterval time.Duration, background bool) (bool, bool) {
+	if dataset == "" {
+		return false, false
+	}
+	if minInterval <= 0 {
+		minInterval = time.Hour
+	}
+	empty := s.datasetEmpty(context.Background(), dataset)
+	if empty {
+		background = false
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if s.syncInFlight == nil {
+		s.syncInFlight = map[string]bool{}
+	}
+	if s.syncLast == nil {
+		s.syncLast = map[string]time.Time{}
+	}
+	if s.syncInFlight[dataset] {
+		return false, false
+	}
+	if last, ok := s.syncLast[dataset]; ok && !last.IsZero() && time.Since(last) < minInterval {
+		return false, false
+	}
+	s.syncInFlight[dataset] = true
+	return true, background
+}
+
+func (s *Store) markSyncComplete(dataset string) {
+	if dataset == "" {
+		return
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if s.syncInFlight != nil {
+		delete(s.syncInFlight, dataset)
+	}
+	if s.syncLast == nil {
+		s.syncLast = map[string]time.Time{}
+	}
+	s.syncLast[dataset] = time.Now()
+}
+
+func (s *Store) datasetEmpty(ctx context.Context, dataset string) bool {
+	if s == nil || s.db == nil || strings.TrimSpace(dataset) == "" {
+		return false
+	}
+	var count int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM emb_asset WHERE dataset_id = ?`, dataset).Scan(&count); err != nil {
+		return false
+	}
+	return count == 0
+}
 
 // SetSCNAllocator overrides the SCN allocator after store creation.
 func (s *Store) SetSCNAllocator(fn SCNAllocator) { s.scnAllocator = fn }
@@ -225,7 +499,9 @@ func (s *Store) SimilaritySearch(ctx context.Context, query string, k int, opts 
 		return s.similaritySearchWindows(ctx, query, k, options)
 	}
 
-	qvec, err := options.Embedder.EmbedQuery(ctx, query)
+	embedCtx, cancel := embeddingContext(ctx)
+	defer cancel()
+	qvec, err := options.Embedder.EmbedQuery(embedCtx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -241,9 +517,11 @@ func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int
 	if len(windows) == 0 {
 		windows = []string{query}
 	}
-	vecs, err := options.Embedder.EmbedDocuments(ctx, windows)
+	embedCtx, cancel := embeddingContext(ctx)
+	defer cancel()
+	vecs, err := options.Embedder.EmbedDocuments(embedCtx, windows)
 	if err != nil {
-		qvec, e2 := options.Embedder.EmbedQuery(ctx, query)
+		qvec, e2 := options.Embedder.EmbedQuery(embedCtx, query)
 		if e2 != nil {
 			return nil, err
 		}
@@ -319,6 +597,21 @@ func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int
 	return out, nil
 }
 
+func embeddingContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.Background(), func() {}
+	}
+	base := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		const minEmbedTimeout = 15 * time.Second
+		if time.Until(deadline) < minEmbedTimeout {
+			return context.WithTimeout(base, minEmbedTimeout)
+		}
+		return context.WithDeadline(base, deadline)
+	}
+	return base, func() {}
+}
+
 func (s *Store) queryOnce(ctx context.Context, dataset string, blob []byte, k int) ([]schema.Document, error) {
 	query := fmt.Sprintf(`SELECT d.id, d.content, d.meta, v.match_score
 FROM %s v
@@ -331,6 +624,10 @@ LIMIT ?`, s.vtable, s.shadow)
 
 	rows, err := s.db.QueryContext(ctx, query, dataset, blob, k)
 	if err != nil {
+		if isMatchUnavailable(err) {
+			fmt.Printf("sqlitevec: MATCH unavailable, falling back to brute-force search (performance may degrade): %v\n", err)
+			return s.fallbackSearch(ctx, dataset, blob, k)
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -357,6 +654,100 @@ LIMIT ?`, s.vtable, s.shadow)
 		return nil, err
 	}
 	return docs, nil
+}
+
+func (s *Store) fallbackSearch(ctx context.Context, dataset string, blob []byte, k int) ([]schema.Document, error) {
+	qvec, err := vector.DecodeEmbedding(blob)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT id, content, meta, embedding FROM %s WHERE dataset_id = ? AND archived = 0`, s.shadow), dataset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type hit struct {
+		doc   schema.Document
+		score float32
+	}
+	var hits []hit
+	for rows.Next() {
+		var id, content, metaJSON string
+		var emb []byte
+		if err := rows.Scan(&id, &content, &metaJSON, &emb); err != nil {
+			return nil, err
+		}
+		vecs, err := vector.DecodeEmbedding(emb)
+		if err != nil {
+			continue
+		}
+		score := cosine(qvec, vecs)
+		metaMap, err := decodeMeta(metaJSON)
+		if err != nil {
+			continue
+		}
+		if _, ok := metaMap[meta.FragmentID]; !ok {
+			metaMap[meta.FragmentID] = id
+		}
+		hits = append(hits, hit{
+			doc:   schema.Document{PageContent: content, Metadata: metaMap, Score: score},
+			score: score,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	if k > 0 && len(hits) > k {
+		hits = hits[:k]
+	}
+	out := make([]schema.Document, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.doc)
+	}
+	return out, nil
+}
+
+func isMatchUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unable to use function MATCH") ||
+		strings.Contains(msg, "no such module: vec") ||
+		strings.Contains(msg, "no such table:")
+}
+
+var matchCheckOnce sync.Once
+
+func checkMatchSupport(db *sql.DB) {
+	matchCheckOnce.Do(func() {
+		if db == nil {
+			return
+		}
+		// Assume MATCH is supported; fall back on runtime errors with a warning.
+	})
+}
+
+func cosine(a, b []float32) float32 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	var dot, na, nb float32
+	for i := 0; i < n; i++ {
+		dot += a[i] * b[i]
+		na += a[i] * a[i]
+		nb += b[i] * b[i]
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / float32(math.Sqrt(float64(na))*math.Sqrt(float64(nb)))
 }
 
 // Remove soft-deletes a document by id.
@@ -423,6 +814,13 @@ func (s *Store) ensureSchemaDDL(ctx context.Context) error {
 			last_indexed_at TIMESTAMP,
 			last_scn        INTEGER NOT NULL DEFAULT 0
 		);`,
+		`CREATE TABLE IF NOT EXISTS emb_root_config (
+			dataset_id      TEXT PRIMARY KEY,
+			include_globs   TEXT,
+			exclude_globs   TEXT,
+			max_size_bytes  INTEGER NOT NULL DEFAULT 0,
+			updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS emb_asset (
 			dataset_id TEXT NOT NULL,
 			asset_id   TEXT NOT NULL,
@@ -455,6 +853,27 @@ func (s *Store) ensureSchemaDDL(ctx context.Context) error {
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) verifySchema(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	names := []string{s.shadow, s.vtable}
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		var found string
+		err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&found)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("sqlitevec: expected table %q not found", name)
+		}
+		if err != nil {
 			return err
 		}
 	}

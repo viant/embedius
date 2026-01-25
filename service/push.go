@@ -313,7 +313,8 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 	}
 	switch driver {
 	case "bigquery":
-		if err := applyShadowDocs(ctx, local, downstream, cfg, buildDocsMerge); err != nil {
+		docsSCN, err := applyShadowDocs(ctx, local, downstream, cfg, buildDocsMerge)
+		if err != nil {
 			return err
 		}
 		if err := applyAssets(ctx, local, downstream, cfg, buildAssetMerge); err != nil {
@@ -322,12 +323,23 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 		if err := applyRoot(ctx, local, downstream, cfg, buildRootMerge); err != nil {
 			return err
 		}
+		if err := applyRootConfig(ctx, local, downstream, cfg, buildRootConfigMerge); err != nil {
+			return err
+		}
 		if err := applyDataset(ctx, local, downstream, cfg, buildDatasetMerge); err != nil {
 			return err
 		}
-		return applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNMerge)
+		if err := applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNMerge); err != nil {
+			return err
+		}
+		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN)
+		if err != nil {
+			return err
+		}
+		return seedUpstreamState(ctx, local, cfg.DatasetID, seedSCN, cfg.Logf)
 	case "mysql":
-		if err := applyShadowDocs(ctx, local, downstream, cfg, buildDocsUpsertMySQL); err != nil {
+		docsSCN, err := applyShadowDocs(ctx, local, downstream, cfg, buildDocsUpsertMySQL)
+		if err != nil {
 			return err
 		}
 		if err := applyAssets(ctx, local, downstream, cfg, buildAssetUpsertMySQL); err != nil {
@@ -336,10 +348,20 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 		if err := applyRoot(ctx, local, downstream, cfg, buildRootUpsertMySQL); err != nil {
 			return err
 		}
+		if err := applyRootConfig(ctx, local, downstream, cfg, buildRootConfigUpsertMySQL); err != nil {
+			return err
+		}
 		if err := applyDataset(ctx, local, downstream, cfg, buildDatasetUpsertMySQL); err != nil {
 			return err
 		}
-		return applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNUpsertMySQL)
+		if err := applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNUpsertMySQL); err != nil {
+			return err
+		}
+		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN)
+		if err != nil {
+			return err
+		}
+		return seedUpstreamState(ctx, local, cfg.DatasetID, seedSCN, cfg.Logf)
 	default:
 		return fmt.Errorf("apply: downstream driver %q not supported", cfg.Driver)
 	}
@@ -348,14 +370,15 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 type docsBuilder func(cfg applyConfig, batch []pushRow) (string, []any, error)
 type assetBuilder func(cfg applyConfig, batch []assetRow) (string, []any, error)
 type rootBuilder func(cfg applyConfig, datasetID string, sourceURI, description sql.NullString, lastIndexed sql.NullTime, lastSCN int64) (string, []any)
+type rootConfigBuilder func(cfg applyConfig, datasetID string, includeGlobs, excludeGlobs sql.NullString, maxSize sql.NullInt64, updatedAt sql.NullTime) (string, []any)
 type datasetBuilder func(cfg applyConfig, datasetID string, description, sourceURI sql.NullString, lastSCN int64) (string, []any)
 type datasetSCNBuilder func(cfg applyConfig, datasetID string, nextSCN int64) (string, []any)
 
-func applyShadowDocs(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg applyConfig, builder docsBuilder) error {
+func applyShadowDocs(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg applyConfig, builder docsBuilder) (int64, error) {
 	stateShadow := applyShadowPrefix + "shadow_vec_docs"
 	lastSCN, err := localLastSCN(ctx, local, cfg.DatasetID, stateShadow)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for {
 		rows, err := local.QueryContext(ctx, `SELECT id, content, meta, embedding, embedding_model, scn, archived
@@ -364,7 +387,7 @@ WHERE dataset_id = ? AND scn > ?
 ORDER BY scn
 LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 		if err != nil {
-			return err
+			return lastSCN, err
 		}
 		var batch []pushRow
 		var maxSCN int64
@@ -372,7 +395,7 @@ LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 			var row pushRow
 			if err := rows.Scan(&row.id, &row.content, &row.meta, &row.embedding, &row.model, &row.scn, &row.archived); err != nil {
 				rows.Close()
-				return err
+				return lastSCN, err
 			}
 			batch = append(batch, row)
 			if row.scn > maxSCN {
@@ -381,37 +404,67 @@ LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return err
+			return lastSCN, err
 		}
 		rows.Close()
 		if len(batch) == 0 {
 			if cfg.Logf != nil {
 				cfg.Logf("apply dataset=%s shadow=%s up_to_scn=%d (no changes)", cfg.DatasetID, "shadow_vec_docs", lastSCN)
 			}
-			return nil
+			return lastSCN, nil
 		}
 		if len(batch) == cfg.BatchSize {
 			expanded, err := loadRowsBySCN(ctx, local, cfg.DatasetID, maxSCN)
 			if err != nil {
-				return err
+				return lastSCN, err
 			}
 			batch = mergeBatch(batch, expanded, maxSCN)
 		}
 		query, args, err := builder(cfg, batch)
 		if err != nil {
-			return err
+			return lastSCN, err
 		}
 		if _, err := downstream.ExecContext(ctx, query, args...); err != nil {
-			return err
+			return lastSCN, err
 		}
 		lastSCN = maxSCN
 		if err := upsertSyncState(ctx, local, cfg.DatasetID, stateShadow, lastSCN); err != nil {
-			return err
+			return lastSCN, err
 		}
 		if cfg.Logf != nil {
 			cfg.Logf("apply dataset=%s shadow=%s applied=%d scn<=%d", cfg.DatasetID, "shadow_vec_docs", len(batch), lastSCN)
 		}
 	}
+}
+
+func seedUpstreamState(ctx context.Context, local *sql.DB, datasetID string, lastSCN int64, logf func(format string, args ...any)) error {
+	if err := upsertSyncState(ctx, local, datasetID, "shadow_vec_docs", lastSCN); err != nil {
+		return err
+	}
+	if logf != nil {
+		logf("sync dataset=%s shadow=%s seeded last_scn=%d", datasetID, "shadow_vec_docs", lastSCN)
+	}
+	return nil
+}
+
+func seedSCNValue(ctx context.Context, local *sql.DB, datasetID string, appliedSCN int64) (int64, error) {
+	if appliedSCN > 0 {
+		return appliedSCN, nil
+	}
+	maxSCN, err := localDocsMaxSCN(ctx, local, datasetID)
+	if err != nil {
+		return 0, err
+	}
+	return maxSCN, nil
+}
+
+func localDocsMaxSCN(ctx context.Context, db *sql.DB, datasetID string) (int64, error) {
+	var maxSCN int64
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(scn), 0) FROM _vec_emb_docs WHERE dataset_id = ?`, datasetID).Scan(&maxSCN)
+	if err != nil {
+		return 0, err
+	}
+	return maxSCN, nil
 }
 
 type assetRow struct {
@@ -497,6 +550,27 @@ func applyRoot(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg apply
 	}
 	if cfg.Logf != nil {
 		cfg.Logf("apply dataset=%s shadow=%s applied=1 scn=%d", cfg.DatasetID, "emb_root", lastSCN)
+	}
+	return nil
+}
+
+func applyRootConfig(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg applyConfig, builder rootConfigBuilder) error {
+	row := local.QueryRowContext(ctx, `SELECT include_globs, exclude_globs, max_size_bytes, updated_at FROM emb_root_config WHERE dataset_id = ?`, cfg.DatasetID)
+	var includeGlobs, excludeGlobs sql.NullString
+	var maxSize sql.NullInt64
+	var updatedAt sql.NullTime
+	if err := row.Scan(&includeGlobs, &excludeGlobs, &maxSize, &updatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	query, args := builder(cfg, cfg.DatasetID, includeGlobs, excludeGlobs, maxSize, updatedAt)
+	if _, err := downstream.ExecContext(ctx, query, args...); err != nil {
+		return err
+	}
+	if cfg.Logf != nil {
+		cfg.Logf("apply dataset=%s shadow=%s applied=1", cfg.DatasetID, "emb_root_config")
 	}
 	return nil
 }
@@ -621,6 +695,49 @@ ON DUPLICATE KEY UPDATE
 	last_indexed_at=VALUES(last_indexed_at),
 	last_scn=VALUES(last_scn)`
 	return query, []any{datasetID, sourceURI.String, description.String, lastIndexed.Time, lastSCN}
+}
+
+func buildRootConfigMerge(cfg applyConfig, datasetID string, includeGlobs, excludeGlobs sql.NullString, maxSize sql.NullInt64, updatedAt sql.NullTime) (string, []any) {
+	query := `MERGE emb_root_config T
+USING (SELECT ? AS dataset_id, ? AS include_globs, ? AS exclude_globs, ? AS max_size_bytes, %s AS updated_at) S
+ON T.dataset_id = S.dataset_id
+WHEN MATCHED THEN UPDATE SET include_globs = S.include_globs, exclude_globs = S.exclude_globs, max_size_bytes = S.max_size_bytes, updated_at = S.updated_at
+WHEN NOT MATCHED THEN INSERT (dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
+VALUES (S.dataset_id, S.include_globs, S.exclude_globs, S.max_size_bytes, S.updated_at)`
+	updatedAtExpr := "?"
+	if cfg.Dialect != nil {
+		if strings.EqualFold(cfg.Driver, "bigquery") {
+			updatedAtExpr = "TIMESTAMP(?)"
+		}
+		query = cfg.Dialect.EnsurePlaceholders(fmt.Sprintf(query, updatedAtExpr))
+	}
+	var updatedAtVal any
+	if updatedAt.Valid {
+		updatedAtVal = updatedAt.Time
+		if strings.EqualFold(cfg.Driver, "bigquery") {
+			updatedAtVal = formatBQTimestamp(updatedAt.Time)
+		}
+	} else {
+		updatedAtVal = nil
+	}
+	return query, []any{datasetID, includeGlobs.String, excludeGlobs.String, maxSize.Int64, updatedAtVal}
+}
+
+func buildRootConfigUpsertMySQL(cfg applyConfig, datasetID string, includeGlobs, excludeGlobs sql.NullString, maxSize sql.NullInt64, updatedAt sql.NullTime) (string, []any) {
+	query := `INSERT INTO emb_root_config (dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+	include_globs=VALUES(include_globs),
+	exclude_globs=VALUES(exclude_globs),
+	max_size_bytes=VALUES(max_size_bytes),
+	updated_at=VALUES(updated_at)`
+	var updatedAtVal any
+	if updatedAt.Valid {
+		updatedAtVal = updatedAt.Time
+	} else {
+		updatedAtVal = nil
+	}
+	return query, []any{datasetID, includeGlobs.String, excludeGlobs.String, maxSize.Int64, updatedAtVal}
 }
 
 func formatBQTimestamp(t time.Time) string {

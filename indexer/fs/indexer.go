@@ -2,6 +2,9 @@ package fs
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	neturl "net/url"
 	"path/filepath"
@@ -118,6 +121,23 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 		norm = url.ToFileURL(norm)
 	}
 
+	root := indexRoot(ctx)
+	logProgress := root != "" && root == location
+	processed := 0
+	nextLog := 1000
+	totalCandidates := 0
+
+	if checker, ok := i.fs.(SnapshotStateChecker); ok {
+		upToDate, err := checker.SnapshotUpToDate(ctx, norm)
+		if err != nil {
+			return nil, nil, err
+		}
+		if upToDate {
+			fmt.Printf("embedius: index skip snapshot up-to-date location=%q\n", norm)
+			return nil, nil, nil
+		}
+	}
+
 	objects, err := i.fs.List(ctx, norm)
 	if err != nil {
 		return nil, nil, err
@@ -130,6 +150,26 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 	if len(objects) > 0 {
 		scheme := url.SchemeExtensionURL(objects[0].URL())
 		baseNormalised = url.Normalize(norm, scheme)
+	}
+	ctx = WithIndexBase(ctx, baseNormalised)
+	if logProgress {
+		for _, object := range objects {
+			objectPath := url.Path(object.URL())
+			if url.Equals(objectPath, location) && object.IsDir() {
+				continue
+			}
+			if i.matcher.IsExcluded(url.Path(object.URL()), int(object.Size())) {
+				continue
+			}
+			if object.IsDir() {
+				oUrl := object.URL()
+				if baseNormalised == oUrl {
+					continue
+				}
+				continue
+			}
+			totalCandidates++
+		}
 	}
 
 	for _, object := range objects {
@@ -165,22 +205,73 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 		toAddDocuments = append(toAddDocuments, docs...)
 
 		toRemove = append(toRemove, ids...)
+		if logProgress {
+			processed++
+			if processed%nextLog == 0 {
+				fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
+			}
+		}
+	}
+	if logProgress && totalCandidates > 0 && processed != totalCandidates {
+		fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
 	}
 
 	return toAddDocuments, toRemove, nil
 }
 
+func relativePath(ctx context.Context, object storage.Object) string {
+	base := indexBase(ctx)
+	if base == "" || object == nil {
+		return ""
+	}
+	basePath := strings.TrimRight(url.Path(base), "/")
+	objPath := url.Path(object.URL())
+	if basePath == "" || objPath == "" {
+		return ""
+	}
+	if !strings.HasPrefix(objPath, basePath) {
+		return ""
+	}
+	rel := strings.TrimPrefix(objPath, basePath)
+	rel = strings.TrimPrefix(rel, "/")
+	return rel
+}
+
 // indexFile indexes a single file
 func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
 	docId := url.Path(object.URL())
+	relPath := relativePath(ctx, object)
+	if assets := existingAssets(ctx); assets != nil && relPath != "" {
+		if meta, ok := assets[relPath]; ok {
+			md5hex := ""
+			if withMD5, ok := object.(interface{ MD5() string }); ok {
+				md5hex = strings.TrimSpace(withMD5.MD5())
+			}
+			if meta.Size == object.Size() && (md5hex == "" || md5hex == meta.MD5) {
+				return nil, nil, nil
+			}
+		}
+	}
+	if existing := existingMD5s(ctx); existing != nil {
+		if withMD5, ok := object.(interface{ MD5() string }); ok {
+			if md5hex := strings.TrimSpace(withMD5.MD5()); md5hex != "" && existing[md5hex] {
+				return nil, nil, nil
+			}
+		}
+	}
 	data, err := i.fs.Download(ctx, object)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to download %s: %w", docId, err)
 	}
 
-	dataHash, _ := computeHash(data)
+	dataHash, md5hex := computeHash(data)
 	if dataHash == 0 {
 		dataHash = uint64(object.ModTime().Unix())
+	}
+	if md5hex != "" {
+		if existing := existingMD5s(ctx); existing != nil && existing[md5hex] {
+			return nil, nil, nil
+		}
 	}
 
 	prev, ok := cache.Get(docId)
@@ -192,6 +283,10 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 	aSplitter := i.splitterFactory.GetSplitter(docId, len(data))
 	// Create new entry
 
+	assetID := docId
+	if relPath != "" {
+		assetID = relPath
+	}
 	entry := &document.Entry{
 		ID:      docId,
 		ModTime: object.ModTime(),
@@ -199,6 +294,9 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 		Fragments: aSplitter.Split(data, map[string]interface{}{
 			meta.DocumentID: docId,
 			"path":          docId,
+			"rel_path":      relPath,
+			"asset_id":      assetID,
+			"md5":           md5hex,
 		}),
 	}
 	cache.Set(docId, entry)
@@ -218,8 +316,10 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 }
 
 // computeHash computes a hash for the given data
-func computeHash(data []byte) (uint64, error) {
-	// Implement appropriate hashing algorithm
-	// For simplicity, using length as a placeholder
-	return uint64(len(data)), nil
+func computeHash(data []byte) (uint64, string) {
+	if len(data) == 0 {
+		return 0, ""
+	}
+	sum := md5.Sum(data)
+	return binary.BigEndian.Uint64(sum[:8]), hex.EncodeToString(sum[:])
 }

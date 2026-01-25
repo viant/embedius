@@ -45,7 +45,23 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 		if req.Logf != nil {
 			req.Logf("sync root=%s starting", spec.Name)
 		}
+		if err := upsertRootConfig(ctx, db, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+			return err
+		}
 		filter := newSyncFilter(spec)
+		if req.ForceReset {
+			if req.Logf != nil {
+				req.Logf("sync root=%s force reset local dataset", spec.Name)
+			}
+			if err := sqlitevec.ResetLocalDataset(ctx, db, sqlitevec.SyncConfig{
+				DatasetID:      spec.Name,
+				UpstreamShadow: req.UpstreamShadow,
+				LocalShadow:    "_vec_emb_docs",
+				AssetTable:     "emb_asset",
+			}); err != nil {
+				return err
+			}
+		}
 		if err := sqlitevec.SyncUpstream(ctx, db, up, sqlitevec.SyncConfig{
 			DatasetID:      spec.Name,
 			UpstreamShadow: req.UpstreamShadow,
@@ -58,9 +74,32 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 		}); err != nil {
 			return err
 		}
+		if err := syncRootConfig(ctx, db, up, spec.Name, req.Logf); err != nil {
+			return err
+		}
 	}
 	if ownedUpstream && up != nil {
 		_ = up.Close()
+	}
+	return nil
+}
+
+func syncRootConfig(ctx context.Context, local *sql.DB, upstream *sql.DB, datasetID string, logf func(format string, args ...any)) error {
+	row := upstream.QueryRowContext(ctx, `SELECT include_globs, exclude_globs, max_size_bytes FROM emb_root_config WHERE dataset_id = ?`, datasetID)
+	var include sql.NullString
+	var exclude sql.NullString
+	var maxSize sql.NullInt64
+	if err := row.Scan(&include, &exclude, &maxSize); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := upsertRootConfig(ctx, local, datasetID, include.String, exclude.String, maxSize.Int64); err != nil {
+		return err
+	}
+	if logf != nil {
+		logf("sync root=%s config updated", datasetID)
 	}
 	return nil
 }

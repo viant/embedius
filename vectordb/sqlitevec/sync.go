@@ -17,6 +17,7 @@ type SyncConfig struct {
 	AssetTable     string // local asset table (e.g. emb_asset)
 	BatchSize      int
 	Invalidate     bool // call vec_invalidate(shadow, dataset) after applying a batch
+	ForceSync      bool // when true, reset local dataset if upstream diverged
 	Logf           func(format string, args ...any)
 	// Filter returns true to apply a log entry for the given path/meta.
 	// Return false to skip applying the entry (SCN still advances).
@@ -49,11 +50,32 @@ func SyncUpstream(ctx context.Context, local *sql.DB, upstream *sql.DB, cfg Sync
 	if err != nil {
 		return err
 	}
-	if cfg.Logf != nil {
-		if pending, maxSCN, err := upstreamPending(ctx, upstream, cfg.DatasetID, cfg.UpstreamShadow, lastSCN); err == nil {
+	var maxSCN int64
+	if pending, upstreamMax, err := upstreamPending(ctx, upstream, cfg.DatasetID, cfg.UpstreamShadow, lastSCN); err == nil {
+		maxSCN = upstreamMax
+		if cfg.Logf != nil {
 			cfg.Logf("sync dataset=%s shadow=%s start last_scn=%d pending=%d max_scn=%d", cfg.DatasetID, cfg.UpstreamShadow, lastSCN, pending, maxSCN)
-		} else {
-			cfg.Logf("sync dataset=%s shadow=%s start last_scn=%d pending=unknown err=%v", cfg.DatasetID, cfg.UpstreamShadow, lastSCN, err)
+		}
+	} else if cfg.Logf != nil {
+		cfg.Logf("sync dataset=%s shadow=%s start last_scn=%d pending=unknown err=%v", cfg.DatasetID, cfg.UpstreamShadow, lastSCN, err)
+	}
+
+	if lastSCN > 0 {
+		diverged, err := upstreamDiverged(ctx, upstream, cfg.DatasetID, cfg.UpstreamShadow, lastSCN, maxSCN)
+		if err != nil {
+			return err
+		}
+		if diverged {
+			if !cfg.ForceSync {
+				return fmt.Errorf("sync: upstream diverged for dataset=%s shadow=%s last_scn=%d max_scn=%d; set ForceSync to reset local dataset", cfg.DatasetID, cfg.UpstreamShadow, lastSCN, maxSCN)
+			}
+			if cfg.Logf != nil {
+				cfg.Logf("sync dataset=%s shadow=%s divergence detected, resetting local dataset (force)", cfg.DatasetID, cfg.UpstreamShadow)
+			}
+			if err := resetLocalDataset(ctx, local, cfg); err != nil {
+				return err
+			}
+			lastSCN = 0
 		}
 	}
 
@@ -76,13 +98,26 @@ LIMIT ?`, cfg.DatasetID, cfg.UpstreamShadow, lastSCN, cfg.BatchSize)
 		var minSCN int64
 		count := 0
 		for rows.Next() {
-			var ds, st, op, docID string
+			var dsVal, stVal, opVal, docIDVal, payloadVal interface{}
+			var op, docID string
 			var scn int64
-			var payload []byte
-			if err := rows.Scan(&ds, &st, &scn, &op, &docID, &payload); err != nil {
+			if err := rows.Scan(&dsVal, &stVal, &scn, &opVal, &docIDVal, &payloadVal); err != nil {
 				rows.Close()
 				return err
 			}
+			srcDataset := normalizeString(dsVal)
+			srcShadow := normalizeString(stVal)
+			if cfg.Logf != nil {
+				if srcDataset != "" && srcDataset != cfg.DatasetID {
+					cfg.Logf("sync dataset=%s shadow=%s warning: row dataset_id=%s (expected %s)", cfg.DatasetID, cfg.UpstreamShadow, srcDataset, cfg.DatasetID)
+				}
+				if srcShadow != "" && srcShadow != cfg.UpstreamShadow {
+					cfg.Logf("sync dataset=%s shadow=%s warning: row shadow_table=%s (expected %s)", cfg.DatasetID, cfg.UpstreamShadow, srcShadow, cfg.UpstreamShadow)
+				}
+			}
+			op = normalizeString(opVal)
+			docID = normalizeString(docIDVal)
+			payload := normalizeBytes(payloadVal)
 			switch strings.ToLower(op) {
 			case "insert":
 				batchInsert++
@@ -121,6 +156,9 @@ LIMIT ?`, cfg.DatasetID, cfg.UpstreamShadow, lastSCN, cfg.BatchSize)
 		if err := upsertSyncState(ctx, local, cfg.DatasetID, cfg.UpstreamShadow, lastSCN); err != nil {
 			return err
 		}
+		if err := updateLocalSCN(ctx, local, cfg.DatasetID, lastSCN); err != nil {
+			return err
+		}
 		if cfg.Invalidate {
 			_, _ = local.ExecContext(ctx, `SELECT vec_invalidate(?, ?)`, cfg.LocalShadow, cfg.DatasetID)
 		}
@@ -131,6 +169,11 @@ LIMIT ?`, cfg.DatasetID, cfg.UpstreamShadow, lastSCN, cfg.BatchSize)
 	}
 }
 
+// ResetLocalDataset clears local tables for a dataset prior to a full sync.
+func ResetLocalDataset(ctx context.Context, local *sql.DB, cfg SyncConfig) error {
+	return resetLocalDataset(ctx, local, cfg)
+}
+
 func upstreamPending(ctx context.Context, upstream *sql.DB, datasetID, shadowTable string, lastSCN int64) (int64, int64, error) {
 	var maxSCN int64
 	var pending int64
@@ -138,6 +181,68 @@ func upstreamPending(ctx context.Context, upstream *sql.DB, datasetID, shadowTab
 FROM vec_shadow_log
 WHERE dataset_id = ? AND shadow_table = ? AND scn > ?`, datasetID, shadowTable, lastSCN).Scan(&maxSCN, &pending)
 	return pending, maxSCN, err
+}
+
+func upstreamDiverged(ctx context.Context, upstream *sql.DB, datasetID, shadowTable string, lastSCN, maxSCN int64) (bool, error) {
+	if maxSCN > 0 && lastSCN > maxSCN {
+		return true, nil
+	}
+	var exists int
+	err := upstream.QueryRowContext(ctx, `SELECT 1
+FROM vec_shadow_log
+WHERE dataset_id = ? AND shadow_table = ? AND scn = ?
+LIMIT 1`, datasetID, shadowTable, lastSCN).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func updateLocalSCN(ctx context.Context, db *sql.DB, datasetID string, lastSCN int64) error {
+	if db == nil || datasetID == "" || lastSCN <= 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO vec_dataset_scn(dataset_id, next_scn) VALUES(?, 0)`, datasetID); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE vec_dataset_scn SET next_scn = CASE WHEN next_scn < ? THEN ? ELSE next_scn END WHERE dataset_id = ?`, lastSCN, lastSCN, datasetID); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE vec_dataset SET last_scn = CASE WHEN last_scn < ? THEN ? ELSE last_scn END WHERE dataset_id = ?`, lastSCN, lastSCN, datasetID); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE emb_root SET last_scn = CASE WHEN last_scn < ? THEN ? ELSE last_scn END WHERE dataset_id = ?`, lastSCN, lastSCN, datasetID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resetLocalDataset(ctx context.Context, local *sql.DB, cfg SyncConfig) error {
+	if local == nil {
+		return nil
+	}
+	if _, err := local.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE dataset_id = ?`, cfg.LocalShadow), cfg.DatasetID); err != nil {
+		return err
+	}
+	if _, err := local.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE dataset_id = ?`, cfg.AssetTable), cfg.DatasetID); err != nil {
+		return err
+	}
+	if _, err := local.ExecContext(ctx, `DELETE FROM vec_sync_state WHERE dataset_id = ? AND shadow_table = ?`, cfg.DatasetID, cfg.UpstreamShadow); err != nil {
+		return err
+	}
+	if _, err := local.ExecContext(ctx, `UPDATE vec_dataset SET last_scn = 0 WHERE dataset_id = ?`, cfg.DatasetID); err != nil {
+		return err
+	}
+	if _, err := local.ExecContext(ctx, `UPDATE emb_root SET last_scn = 0 WHERE dataset_id = ?`, cfg.DatasetID); err != nil {
+		return err
+	}
+	if _, err := local.ExecContext(ctx, `UPDATE vec_dataset_scn SET next_scn = 0 WHERE dataset_id = ?`, cfg.DatasetID); err != nil {
+		return err
+	}
+	return nil
 }
 
 type logPayload struct {
@@ -230,12 +335,61 @@ func decodeHexBlob(hexStr string) ([]byte, error) {
 	return hex.DecodeString(hexStr)
 }
 
+func normalizeString(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case []byte:
+		return string(v)
+	case *[]byte:
+		if v == nil {
+			return ""
+		}
+		return string(*v)
+	case *string:
+		if v == nil {
+			return ""
+		}
+		return *v
+	default:
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+func normalizeBytes(value interface{}) []byte {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return v
+	case *[]byte:
+		if v == nil {
+			return nil
+		}
+		return *v
+	case string:
+		return []byte(v)
+	case *string:
+		if v == nil {
+			return nil
+		}
+		return []byte(*v)
+	default:
+		return []byte(fmt.Sprintf("%v", value))
+	}
+}
+
 func assetFromMeta(metaStr, docID string) (assetID, relPath, md5hex string) {
 	if metaStr != "" {
 		var meta map[string]interface{}
 		if err := json.Unmarshal([]byte(metaStr), &meta); err == nil {
 			if v, ok := meta["asset_id"].(string); ok && v != "" {
 				assetID = v
+			}
+			if v, ok := meta["rel_path"].(string); ok && v != "" {
+				relPath = v
 			}
 			if v, ok := meta["path"].(string); ok && v != "" {
 				relPath = v

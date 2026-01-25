@@ -63,6 +63,14 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 		if err := ensureDataset(ctx, conn, spec.Name, absRoot); err != nil {
 			return err
 		}
+		if err := upsertRootConfig(ctx, conn, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+			return err
+		}
+		if req.Logf != nil {
+			if info, err := rootSummary(ctx, conn, spec.Name); err == nil {
+				logRootSummary(req.Logf, "index start", info)
+			}
+		}
 		if up != nil {
 			if err := sqlitevec.SyncUpstream(ctx, db, up, sqlitevec.SyncConfig{
 				DatasetID:      spec.Name,
@@ -102,6 +110,9 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 			if ok && info.md5 == f.md5 && !info.archived {
 				continue
 			}
+			if req.Logf != nil {
+				req.Logf("index file root=%s path=%s size=%d md5=%s", spec.Name, f.rel, f.size, f.md5)
+			}
 			scn, err := nextSCN(ctx, conn, spec.Name)
 			if err != nil {
 				return err
@@ -139,6 +150,11 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 				return err
 			}
 		}
+		if req.Logf != nil {
+			if info, err := rootSummary(ctx, conn, spec.Name); err == nil {
+				logRootSummary(req.Logf, "index done", info)
+			}
+		}
 		if req.Progress != nil && total == 0 {
 			req.Progress(spec.Name, 0, 0, "", tokenTotal)
 		}
@@ -148,4 +164,44 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 		_ = up.Close()
 	}
 	return nil
+}
+
+func rootSummary(ctx context.Context, q sqlQueryer, datasetID string) (RootInfo, error) {
+	query := `SELECT r.dataset_id, r.source_uri, r.last_scn, r.last_indexed_at,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 1) AS assets_archived,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 0) AS assets_active,
+    (SELECT COALESCE(SUM(size), 0) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets_size,
+    (SELECT MAX(mod_time) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS last_asset_mod_time,
+    (SELECT md5 FROM emb_asset a WHERE a.dataset_id = r.dataset_id ORDER BY mod_time DESC LIMIT 1) AS last_asset_md5,
+    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id) AS docs,
+    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 1) AS docs_archived,
+    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS docs_active,
+    (SELECT COALESCE(AVG(LENGTH(content)), 0) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS avg_doc_len,
+    (SELECT MAX(scn) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id) AS last_doc_scn,
+    (SELECT embedding_model FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND embedding_model <> '' ORDER BY scn DESC LIMIT 1) AS embedding_model,
+    (SELECT COALESCE(MAX(last_scn), 0) FROM vec_sync_state s WHERE s.dataset_id = r.dataset_id) AS last_sync_scn,
+    (SELECT GROUP_CONCAT(DISTINCT shadow_table) FROM vec_sync_state s WHERE s.dataset_id = r.dataset_id) AS upstream_shadow
+FROM emb_root r WHERE r.dataset_id = ?`
+	var info RootInfo
+	row := q.QueryRowContext(ctx, query, datasetID)
+	if err := row.Scan(&info.DatasetID, &info.SourceURI, &info.LastSCN, &info.LastIndexedAt, &info.Assets, &info.AssetsArchived, &info.AssetsActive, &info.AssetsSize, &info.LastAssetMod, &info.LastAssetMD5, &info.Documents, &info.DocsArchived, &info.DocsActive, &info.AvgDocLen, &info.LastDocSCN, &info.EmbeddingModel, &info.LastSyncSCN, &info.UpstreamShadow); err != nil {
+		return RootInfo{}, err
+	}
+	return info, nil
+}
+
+func logRootSummary(logf func(format string, args ...any), prefix string, info RootInfo) {
+	if logf == nil {
+		return
+	}
+	lastIdx := ""
+	if info.LastIndexedAt.Valid {
+		lastIdx = info.LastIndexedAt.String
+	}
+	lastDocSCN := int64(0)
+	if info.LastDocSCN.Valid {
+		lastDocSCN = info.LastDocSCN.Int64
+	}
+	logf("%s root=%s scn=%d last_doc_scn=%d last_sync_scn=%d assets=%d docs=%d indexed_at=%s", prefix, info.DatasetID, info.LastSCN, lastDocSCN, info.LastSyncSCN, info.Assets, info.Documents, lastIdx)
 }

@@ -236,6 +236,13 @@ func ensureSchema(ctx context.Context, q sqlQueryer) error {
 			last_indexed_at DATETIME,
 			last_scn INTEGER NOT NULL DEFAULT 0
 		);`,
+		`CREATE TABLE IF NOT EXISTS emb_root_config (
+			dataset_id TEXT PRIMARY KEY,
+			include_globs TEXT,
+			exclude_globs TEXT,
+			max_size_bytes INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS emb_asset (
 			dataset_id TEXT NOT NULL,
 			asset_id TEXT NOT NULL,
@@ -286,6 +293,31 @@ func ensureDataset(ctx context.Context, q sqlQueryer, datasetID, sourcePath stri
 	return err
 }
 
+func upsertRootConfig(ctx context.Context, q sqlQueryer, datasetID, includeGlobs, excludeGlobs string, maxSizeBytes int64) error {
+	if datasetID == "" {
+		return nil
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO emb_root_config(dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
+VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+ON CONFLICT(dataset_id) DO UPDATE SET
+include_globs=excluded.include_globs,
+exclude_globs=excluded.exclude_globs,
+max_size_bytes=excluded.max_size_bytes,
+updated_at=CURRENT_TIMESTAMP`, datasetID, includeGlobs, excludeGlobs, maxSizeBytes)
+	return err
+}
+
+func encodeGlobList(globs []string) string {
+	if len(globs) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(globs)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func loadAssets(ctx context.Context, q sqlQueryer, datasetID string) (map[string]assetInfo, error) {
 	rows, err := q.QueryContext(ctx, `SELECT asset_id, md5, archived FROM emb_asset WHERE dataset_id = ?`, datasetID)
 	if err != nil {
@@ -316,10 +348,10 @@ func nextSCN(ctx context.Context, q sqlQueryer, datasetID string) (uint64, error
 	if err := q.QueryRowContext(ctx, `SELECT next_scn FROM vec_dataset_scn WHERE dataset_id = ?`, datasetID).Scan(&scn); err != nil {
 		return 0, err
 	}
-	if _, err := q.ExecContext(ctx, `UPDATE vec_dataset SET last_scn = ? WHERE dataset_id = ?`, scn, datasetID); err != nil {
+	if _, err := q.ExecContext(ctx, `UPDATE vec_dataset SET last_scn = CASE WHEN last_scn < ? THEN ? ELSE last_scn END WHERE dataset_id = ?`, scn, scn, datasetID); err != nil {
 		return 0, err
 	}
-	if _, err := q.ExecContext(ctx, `UPDATE emb_root SET last_scn = ?, last_indexed_at = CURRENT_TIMESTAMP WHERE dataset_id = ?`, scn, datasetID); err != nil {
+	if _, err := q.ExecContext(ctx, `UPDATE emb_root SET last_scn = CASE WHEN last_scn < ? THEN ? ELSE last_scn END, last_indexed_at = CURRENT_TIMESTAMP WHERE dataset_id = ?`, scn, scn, datasetID); err != nil {
 		return 0, err
 	}
 	return scn, nil

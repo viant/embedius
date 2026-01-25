@@ -4,17 +4,19 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/viant/afs"
 	"github.com/viant/afs/file"
 	"github.com/viant/afs/url"
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/indexer/cache"
+	"github.com/viant/embedius/indexer/fs"
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb"
 	"github.com/viant/embedius/vectordb/meta"
 	"github.com/viant/embedius/vectorstores"
-	"strings"
 )
 
 // Set represents a collection of documents for a specific location
@@ -28,6 +30,18 @@ type Set struct {
 	upstreamURL   string
 	vectorOptions []vectorstores.Option
 	cache         *cache.Map[string, document.Entry]
+}
+
+type md5Lookup interface {
+	ExistingAssetMD5s(ctx context.Context, dataset string, md5s []string) (map[string]bool, error)
+}
+
+type md5Lister interface {
+	AssetMD5s(ctx context.Context, dataset string) (map[string]bool, error)
+}
+
+type assetMetaLister interface {
+	AssetMetaByPath(ctx context.Context, dataset string) (map[string]fs.AssetMeta, error)
 }
 
 // SimilaritySearch performs similarity search against the vector vectorDb
@@ -47,13 +61,123 @@ func (s *Set) ensureEmbedder(opts []vectorstores.Option) []vectorstores.Option {
 
 // Index indexes content at the specified URI
 func (s *Set) Index(ctx context.Context, URI string) error {
+	fmt.Printf("embedius: index start location=%q namespace=%q\n", URI, s.namespace)
+	ctx = fs.WithIndexRoot(ctx, URI)
+	if cfg := upstreamSyncConfig(ctx); cfg != nil {
+		if syncer, ok := s.vectorDb.(vectordb.UpstreamSyncer); ok {
+			cfgCopy := *cfg
+			if strings.TrimSpace(cfgCopy.DatasetID) == "" {
+				cfgCopy.DatasetID = s.datasetName()
+			}
+			if err := syncer.SyncUpstream(ctx, cfgCopy); err != nil {
+				return fmt.Errorf("upstream sync failed: %w", err)
+			}
+		}
+	}
+	if lister, ok := s.vectorDb.(md5Lister); ok {
+		md5s, err := lister.AssetMD5s(ctx, s.datasetName())
+		if err != nil {
+			return fmt.Errorf("load md5 set failed: %w", err)
+		}
+		if len(md5s) > 0 {
+			ctx = fs.WithExistingMD5s(ctx, md5s)
+		}
+	}
+	if lister, ok := s.vectorDb.(assetMetaLister); ok {
+		assets, err := lister.AssetMetaByPath(ctx, s.datasetName())
+		if err != nil {
+			return fmt.Errorf("load asset meta failed: %w", err)
+		}
+		if len(assets) > 0 {
+			ctx = fs.WithExistingAssets(ctx, assets)
+		}
+	}
 	toAddDocuments, toRemove, err := s.indexer.Index(ctx, URI, s.cache)
 	if err != nil {
+		fmt.Printf("embedius: index error location=%q err=%v\n", URI, err)
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
 	if len(toAddDocuments) == 0 && len(toRemove) == 0 {
+		fmt.Printf("embedius: index no-op location=%q\n", URI)
 		return nil // Nothing changed
+	}
+
+	// Skip embedding documents whose md5 already exists in the dataset.
+	if lookup, ok := s.vectorDb.(md5Lookup); ok && len(toAddDocuments) > 0 {
+		dataset := s.datasetName()
+		md5ByDoc := map[string]string{}
+		md5s := make([]string, 0, len(toAddDocuments))
+		for _, doc := range toAddDocuments {
+			if doc.Metadata == nil {
+				continue
+			}
+			md5hex, _ := doc.Metadata["md5"].(string)
+			docID, _ := doc.Metadata[meta.DocumentID].(string)
+			md5hex = strings.TrimSpace(md5hex)
+			if md5hex == "" || docID == "" {
+				continue
+			}
+			if _, ok := md5ByDoc[docID]; ok {
+				continue
+			}
+			md5ByDoc[docID] = md5hex
+			md5s = append(md5s, md5hex)
+		}
+		if len(md5s) > 0 {
+			existing, err := lookup.ExistingAssetMD5s(ctx, dataset, md5s)
+			if err != nil {
+				return fmt.Errorf("md5 lookup failed: %w", err)
+			}
+			if len(existing) > 0 {
+				skipDocs := map[string]bool{}
+				for docID, md5hex := range md5ByDoc {
+					if existing[md5hex] {
+						skipDocs[docID] = true
+					}
+				}
+				if len(skipDocs) > 0 {
+					filtered := make([]schema.Document, 0, len(toAddDocuments))
+					skipped := 0
+					for _, doc := range toAddDocuments {
+						docID, _ := doc.Metadata[meta.DocumentID].(string)
+						if skipDocs[docID] {
+							skipped++
+							continue
+						}
+						filtered = append(filtered, doc)
+					}
+					toAddDocuments = filtered
+					if skipped > 0 {
+						fmt.Printf("embedius: index skip location=%q md5_existing=%d\n", URI, skipped)
+					}
+					if len(toRemove) > 0 {
+						skipIDs := map[string]bool{}
+						for docID := range skipDocs {
+							entry, ok := s.cache.Get(docID)
+							if !ok || entry == nil {
+								continue
+							}
+							for _, id := range entry.Fragments.VectorDBIDs() {
+								if id != "" {
+									skipIDs[id] = true
+								}
+							}
+						}
+						if len(skipIDs) > 0 {
+							filteredRemove := make([]string, 0, len(toRemove))
+							for _, id := range toRemove {
+								if skipIDs[id] {
+									continue
+								}
+								filteredRemove = append(filteredRemove, id)
+							}
+							toRemove = filteredRemove
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Remove documents that are no longer needed
@@ -77,7 +201,19 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 		}
 	}
 
+	fmt.Printf("embedius: index done location=%q added=%d removed=%d\n", URI, len(toAddDocuments), len(toRemove))
 	return s.Persist(ctx)
+}
+
+func (s *Set) datasetName() string {
+	opts := vectorstores.Options{}
+	for _, opt := range s.vectorOptions {
+		opt(&opts)
+	}
+	if strings.TrimSpace(opts.NameSpace) != "" {
+		return opts.NameSpace
+	}
+	return "default"
 }
 
 // updateEntriesWithIDs updates entries with IDs returned from the vector vectorDb

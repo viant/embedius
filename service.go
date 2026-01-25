@@ -14,6 +14,14 @@ type Service struct {
 
 // Match retrieves documents matching the query
 func (s *Service) Match(ctx context.Context, query string, limit int, location string, opts ...vectorstores.Option) ([]schema.Document, error) {
+	if indexer.AsyncIndexEnabled(ctx) {
+		bgCtx := context.WithoutCancel(ctx)
+		if cfg := indexer.UpstreamSyncConfigFromContext(ctx); cfg != nil {
+			bgCtx = indexer.WithUpstreamSyncConfig(bgCtx, cfg)
+		}
+		s.indexer.SkipIndexOnce(location)
+		s.indexer.AddAsync(bgCtx, location)
+	}
 
 	set, err := s.indexer.Add(ctx, location)
 	if err != nil {

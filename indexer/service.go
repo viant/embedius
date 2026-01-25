@@ -3,12 +3,14 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
+
 	"github.com/viant/afs"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/vectordb"
 	"github.com/viant/embedius/vectordb/sqlitevec"
-	"path/filepath"
-	"sync"
 )
 
 // Service manages document sets for different locations
@@ -20,6 +22,10 @@ type Service struct {
 	embedder embeddings.Embedder
 	mux      sync.RWMutex
 	indexer  Indexer
+	skipMu   sync.Mutex
+	skipOnce map[string]int
+	asyncMu  sync.Mutex
+	inFlight map[string]bool
 }
 
 // Embedder returns the embedder used by the service
@@ -47,12 +53,71 @@ func (s *Service) Add(ctx context.Context, location string) (*Set, error) {
 
 	}
 	s.mux.Unlock()
-	// Index the content
-	if err = set.Index(ctx, location); err != nil {
-		return nil, fmt.Errorf("failed to index content: %w", err)
+	// Index the content unless explicitly skipped.
+	if !s.consumeSkip(location) {
+		if err = set.Index(ctx, location); err != nil {
+			return nil, fmt.Errorf("failed to index content: %w", err)
+		}
 	}
 
 	return set, nil
+}
+
+// SkipIndexOnce skips indexing for the next Add call for the provided location.
+func (s *Service) SkipIndexOnce(location string) {
+	if strings.TrimSpace(location) == "" {
+		return
+	}
+	s.skipMu.Lock()
+	defer s.skipMu.Unlock()
+	if s.skipOnce == nil {
+		s.skipOnce = map[string]int{}
+	}
+	s.skipOnce[location]++
+}
+
+func (s *Service) consumeSkip(location string) bool {
+	s.skipMu.Lock()
+	defer s.skipMu.Unlock()
+	if s.skipOnce == nil {
+		return false
+	}
+	count := s.skipOnce[location]
+	if count <= 0 {
+		return false
+	}
+	if count == 1 {
+		delete(s.skipOnce, location)
+	} else {
+		s.skipOnce[location] = count - 1
+	}
+	return true
+}
+
+// AddAsync triggers background indexing for the location if not already running.
+func (s *Service) AddAsync(ctx context.Context, location string) {
+	if strings.TrimSpace(location) == "" {
+		return
+	}
+	s.asyncMu.Lock()
+	if s.inFlight == nil {
+		s.inFlight = map[string]bool{}
+	}
+	if s.inFlight[location] {
+		s.asyncMu.Unlock()
+		return
+	}
+	s.inFlight[location] = true
+	s.asyncMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.asyncMu.Lock()
+			delete(s.inFlight, location)
+			s.asyncMu.Unlock()
+		}()
+		_, _ = s.Add(ctx, location)
+	}()
 }
 
 // NewService creates a new storage service

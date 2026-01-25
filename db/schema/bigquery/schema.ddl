@@ -45,6 +45,15 @@ CREATE TABLE IF NOT EXISTS `emb_root` (
 )
 CLUSTER BY dataset_id;
 
+CREATE TABLE IF NOT EXISTS `emb_root_config` (
+  dataset_id      STRING NOT NULL,
+  include_globs   STRING,
+  exclude_globs   STRING,
+  max_size_bytes  INT64 NOT NULL,
+  updated_at      TIMESTAMP
+)
+CLUSTER BY dataset_id;
+
 CREATE TABLE IF NOT EXISTS `emb_asset` (
   dataset_id STRING NOT NULL,
   asset_id   STRING NOT NULL,

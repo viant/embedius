@@ -152,6 +152,7 @@ func syncCmd(args []string) {
 	upstreamShadow := flags.String("upstream-shadow", "shadow_vec_docs", "upstream shadow table name")
 	syncBatch := flags.Int("sync-batch", 200, "upstream sync batch size")
 	invalidate := flags.Bool("invalidate", false, "invalidate vec cache after sync")
+	forceReset := flags.Bool("force-reset", false, "reset local dataset before sync (dangerous)")
 	progress := flags.Bool("progress", false, "show sync progress")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
@@ -234,6 +235,7 @@ func syncCmd(args []string) {
 		UpstreamShadow: *upstreamShadow,
 		SyncBatch:      *syncBatch,
 		Invalidate:     *invalidate,
+		ForceReset:     *forceReset,
 		Logf:           logf,
 	}); err != nil {
 		log.Fatalf("sync: %v", err)
@@ -547,7 +549,7 @@ func progressPrinter(enabled bool) func(root string, current, total int, path st
 		if path == "" {
 			path = "-"
 		}
-		line := fmt.Sprintf("root=%s indexed %d/%d tokens=%d %s", root, current, total, tokens, path)
+		line := fmt.Sprintf("root=%s processed %d/%d tokens=%d %s", root, current, total, tokens, path)
 		if lastLen > len(line) {
 			line = line + strings.Repeat(" ", lastLen-len(line))
 		}

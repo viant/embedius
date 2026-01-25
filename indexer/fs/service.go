@@ -13,3 +13,9 @@ type Service interface {
 	// Download returns the content of the given object.
 	Download(ctx context.Context, object storage.Object) ([]byte, error)
 }
+
+// SnapshotStateChecker is an optional interface for FS backends that can
+// determine whether a snapshot is already up-to-date.
+type SnapshotStateChecker interface {
+	SnapshotUpToDate(ctx context.Context, location string) (bool, error)
+}

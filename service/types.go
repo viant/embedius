@@ -55,6 +55,7 @@ type SyncRequest struct {
 	UpstreamShadow string
 	SyncBatch      int
 	Invalidate     bool
+	ForceReset     bool
 	Logf           func(format string, args ...any)
 }
 

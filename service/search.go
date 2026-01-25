@@ -56,11 +56,13 @@ LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
 	if err != nil && (strings.Contains(err.Error(), "no such module: vec") ||
 		strings.Contains(err.Error(), "no such table: emb_docs") ||
 		strings.Contains(err.Error(), "unable to use function MATCH")) {
+		fmt.Printf("embedius: MATCH unavailable, falling back to brute-force search: %v\n", err)
 		return fallbackSearch(ctx, conn, req.Dataset, qvec, req.MinScore, req.Limit)
 	}
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("embedius: MATCH query used\n")
 	defer rows.Close()
 
 	var out []SearchResult

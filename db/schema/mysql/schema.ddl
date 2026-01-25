@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS emb_root (
   last_scn        BIGINT NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS emb_root_config (
+  dataset_id     VARCHAR(255) PRIMARY KEY,
+  include_globs  TEXT,
+  exclude_globs  TEXT,
+  max_size_bytes BIGINT NOT NULL DEFAULT 0,
+  updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS emb_asset (
   dataset_id VARCHAR(255) NOT NULL,
   asset_id   VARCHAR(512) NOT NULL,
