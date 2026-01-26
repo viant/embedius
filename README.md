@@ -42,6 +42,9 @@ embedius index --root abc --path /abs/path/to/abc --db /tmp/vec.sqlite \\
 # Index multiple roots from config
 embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite
 
+# Index all roots from config
+embedius index --config /path/to/roots.yaml --all
+
 # Force --db even when config has db:
 embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite --db-force
 
