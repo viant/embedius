@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,7 +63,7 @@ func indexCmd(args []string) {
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
 	rootPath := flags.String("path", "", "filesystem path to index (required)")
-	configPath := flags.String("config", "", "config yaml with roots (optional)")
+	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	allRoots := flags.Bool("all", false, "index all roots in config (requires --config)")
 	include := flags.String("include", "", "comma-separated include patterns")
 	exclude := flags.String("exclude", "", "comma-separated exclude patterns")
@@ -84,10 +86,11 @@ func indexCmd(args []string) {
 	defer cancel()
 	maybeDebugSleep("index", *debugSleep)
 
+	configPathVal := resolveConfigPath(*configPath)
 	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:         *root,
 		RootPath:     *rootPath,
-		ConfigPath:   *configPath,
+		ConfigPath:   configPathVal,
 		All:          *allRoots,
 		RequirePath:  true,
 		Include:      service.ParseCSV(*include),
@@ -139,7 +142,7 @@ func syncCmd(args []string) {
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
-	configPath := flags.String("config", "", "config yaml with roots (optional)")
+	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	allRoots := flags.Bool("all", false, "sync all roots in config (requires --config)")
 	include := flags.String("include", "", "comma-separated include patterns")
 	exclude := flags.String("exclude", "", "comma-separated exclude patterns")
@@ -169,9 +172,10 @@ func syncCmd(args []string) {
 	defer cancel()
 	maybeDebugSleep("sync", *debugSleep)
 
+	configPathVal := resolveConfigPath(*configPath)
 	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:         *root,
-		ConfigPath:   *configPath,
+		ConfigPath:   configPathVal,
 		All:          *allRoots,
 		RequirePath:  false,
 		Include:      service.ParseCSV(*include),
@@ -288,7 +292,7 @@ func adminCmd(args []string) {
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
-	configPath := flags.String("config", "", "config yaml with roots (optional)")
+	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	allRoots := flags.Bool("all", false, "apply to all roots in config (requires --config)")
 	action := flags.String("action", "rebuild", "action: rebuild|invalidate|prune|check")
 	shadow := flags.String("shadow", "main._vec_emb_docs", "shadow table (qualified, for rebuild/invalidate)")
@@ -307,9 +311,10 @@ func adminCmd(args []string) {
 	defer cancel()
 	maybeDebugSleep("admin", *debugSleep)
 
+	configPathVal := resolveConfigPath(*configPath)
 	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:        *root,
-		ConfigPath:  *configPath,
+		ConfigPath:  configPathVal,
 		All:         *allRoots,
 		RequirePath: false,
 	})
@@ -360,8 +365,10 @@ func searchCmd(args []string) {
 	flags := flag.NewFlagSet("search", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
-	configPath := flags.String("config", "", "config yaml with roots (optional)")
-	root := flags.String("root", "", "root/dataset name (required)")
+	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
+	root := flags.String("root", "", "root/dataset name (required unless --all)")
+	allRoots := flags.Bool("all", false, "search all roots in config (requires --config)")
+	allWorkers := flags.Int("all-workers", 5, "max concurrent root searches with --all")
 	query := flags.String("query", "", "query text (required)")
 	prompt := flags.String("prompt", "", "alias for --query")
 	model := flags.String("model", "text-embedding-3-small", "embedding model")
@@ -375,7 +382,7 @@ func searchCmd(args []string) {
 	if *query == "" && *prompt != "" {
 		*query = *prompt
 	}
-	if *root == "" || *query == "" {
+	if *query == "" || (!*allRoots && *root == "") {
 		flags.Usage()
 		os.Exit(2)
 	}
@@ -384,13 +391,18 @@ func searchCmd(args []string) {
 	defer cancel()
 	maybeDebugSleep("search", *debugSleep)
 
+	configPathVal := resolveConfigPath(*configPath)
 	var roots []service.RootSpec
 	var cfgDB string
-	if *configPath != "" {
+	if configPathVal != "" || *allRoots {
+		if configPathVal == "" {
+			log.Fatalf("search: --all requires --config or ~/embedius/config.yaml")
+		}
 		var err error
 		roots, cfgDB, err = service.ResolveRoots(service.ResolveRootsRequest{
 			Root:        *root,
-			ConfigPath:  *configPath,
+			ConfigPath:  configPathVal,
+			All:         *allRoots,
 			RequirePath: false,
 		})
 		if err != nil {
@@ -409,6 +421,72 @@ func searchCmd(args []string) {
 		log.Fatalf("service init: %v", err)
 	}
 	defer func() { _ = svc.Close() }()
+
+	if *allRoots {
+		workers := *allWorkers
+		if workers < 1 {
+			workers = 1
+		}
+		type searchOutcome struct {
+			root    string
+			results []service.SearchResult
+			err     error
+		}
+		jobs := make(chan service.RootSpec)
+		results := make(chan searchOutcome, len(roots))
+
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for r := range jobs {
+					res, err := svc.Search(ctx, service.SearchRequest{
+						DBPath:   dbPathVal,
+						Dataset:  r.Name,
+						Query:    *query,
+						Embedder: emb,
+						Model:    *model,
+						Limit:    *limit,
+						MinScore: *minScore,
+					})
+					results <- searchOutcome{root: r.Name, results: res, err: err}
+				}
+			}()
+		}
+
+		go func() {
+			for _, r := range roots {
+				jobs <- r
+			}
+			close(jobs)
+			wg.Wait()
+			close(results)
+		}()
+
+		outcomes := make(map[string]searchOutcome, len(roots))
+		var firstErr error
+		for res := range results {
+			outcomes[res.root] = res
+			if res.err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("root=%s: %w", res.root, res.err)
+			}
+		}
+		if firstErr != nil {
+			log.Fatalf("search: %v", firstErr)
+		}
+		for _, r := range roots {
+			res := outcomes[r.Name]
+			for _, item := range res.results {
+				out := item.Content
+				if len(out) > 200 {
+					out = out[:200] + "..."
+				}
+				fmt.Printf("root=%s id=%s score=%.4f path=%s\n%s\n\n", r.Name, item.ID, item.Score, item.Path, out)
+			}
+		}
+		return
+	}
 
 	rootName := *root
 	if len(roots) > 0 {
@@ -439,14 +517,15 @@ func rootsCmd(args []string) {
 	flags := flag.NewFlagSet("roots", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
-	configPath := flags.String("config", "", "config yaml with roots (optional)")
+	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (optional)")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
 
 	var cfgDB string
-	if *configPath != "" {
-		cfg, err := service.LoadConfig(*configPath)
+	configPathVal := resolveConfigPath(*configPath)
+	if configPathVal != "" {
+		cfg, err := service.LoadConfig(configPathVal)
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
@@ -517,6 +596,21 @@ func resolveDBPath(flagDB, configDB string, force bool, fallback string) string 
 		return flagDB
 	}
 	return fallback
+}
+
+func resolveConfigPath(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(home, "embedius", "config.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
 }
 
 func selectEmbedder(name, apiKey, model string) embeddings.Embedder {

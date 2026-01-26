@@ -73,7 +73,7 @@ require (
 	github.com/rogpeppe/go-internal v1.11.0 // indirect
 	github.com/viant/sqlite-vec v0.1.1-0.20260125221439-ab0835ed7e73
 	github.com/viant/toolbox v0.36.0 // indirect
-	github.com/viant/vec v0.1.1-0.20240628004145-aad750556278 // indirect
+	github.com/viant/vec v0.2.4-0.20250819200643-7e16b6ea443c // indirect
 	github.com/viant/xreflect v0.6.2 // indirect
 	github.com/viant/xunsafe v0.9.3-0.20240530173106-69808f27713b // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.51.0 // indirect
