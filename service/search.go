@@ -2,9 +2,13 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
+	"github.com/viant/embedius/embeddings"
+	"github.com/viant/sqlite-vec/engine"
+	"github.com/viant/sqlite-vec/vec"
 	"github.com/viant/sqlite-vec/vector"
 )
 
@@ -31,6 +35,24 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) ([]SearchResult
 	}
 	defer conn.Close()
 
+	return s.searchWithConn(ctx, conn, req, emb, db)
+}
+
+func (s *Service) SearchWithConn(ctx context.Context, conn *sql.Conn, req SearchRequest) ([]SearchResult, error) {
+	if req.Dataset == "" || req.Query == "" {
+		return nil, fmt.Errorf("dataset and query are required")
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	emb, err := s.resolveEmbedder(req.Embedder)
+	if err != nil {
+		return nil, err
+	}
+	return s.searchWithConn(ctx, conn, req, emb, nil)
+}
+
+func (s *Service) searchWithConn(ctx context.Context, conn *sql.Conn, req SearchRequest, emb embeddings.Embedder, db *sql.DB) ([]SearchResult, error) {
 	vecs, err := emb.EmbedDocuments(ctx, []string{req.Query})
 	if err != nil {
 		return nil, err
@@ -53,18 +75,66 @@ WHERE v.dataset_id = ?
   AND v.match_score >= ?
 ORDER BY v.match_score DESC
 LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
-	if err != nil && (strings.Contains(err.Error(), "no such module: vec") ||
-		strings.Contains(err.Error(), "no such table: emb_docs") ||
-		strings.Contains(err.Error(), "unable to use function MATCH")) {
-		fmt.Printf("embedius: MATCH unavailable, falling back to brute-force search: %v\n", err)
-		return fallbackSearch(ctx, conn, req.Dataset, qvec, req.MinScore, req.Limit)
+	if err != nil {
+		if db != nil && strings.Contains(err.Error(), "no such module: vec") {
+			if rows, err := s.matchWithFreshDB(ctx, req, blob); err == nil {
+				return rows, nil
+			}
+		}
+		if err != nil && (strings.Contains(err.Error(), "no such module: vec") ||
+			strings.Contains(err.Error(), "no such table: emb_docs") ||
+			strings.Contains(err.Error(), "unable to use function MATCH")) {
+			fmt.Printf("embedius: MATCH unavailable, falling back to brute-force search: %v\n", err)
+			return fallbackSearch(ctx, conn, req.Dataset, qvec, req.MinScore, req.Limit)
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
+	defer rows.Close()
+
+	return scanSearchRows(rows)
+}
+
+func (s *Service) matchWithFreshDB(ctx context.Context, req SearchRequest, blob []byte) ([]SearchResult, error) {
+	db, err := engine.Open(req.DBPath)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("embedius: MATCH query used\n")
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	if err := vec.Register(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	conn, err := ensureSchemaConn(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	defer func() {
+		_ = conn.Close()
+		_ = db.Close()
+	}()
+	rows, err := conn.QueryContext(ctx, `SELECT d.id, v.match_score, d.content, d.meta
+FROM emb_docs v
+JOIN _vec_emb_docs d ON d.dataset_id = v.dataset_id AND d.id = v.doc_id
+WHERE v.dataset_id = ?
+  AND v.doc_id MATCH ?
+  AND d.archived = 0
+  AND v.match_score >= ?
+ORDER BY v.match_score DESC
+LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
+	return scanSearchRows(rows)
+}
 
+func scanSearchRows(rows *sql.Rows) ([]SearchResult, error) {
 	var out []SearchResult
 	for rows.Next() {
 		var item SearchResult

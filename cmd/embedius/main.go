@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log"
@@ -18,6 +19,8 @@ import (
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/embeddings/openai"
 	"github.com/viant/embedius/service"
+	"github.com/viant/sqlite-vec/engine"
+	"github.com/viant/sqlite-vec/vec"
 )
 
 func main() {
@@ -435,13 +438,39 @@ func searchCmd(args []string) {
 		jobs := make(chan service.RootSpec)
 		results := make(chan searchOutcome, len(roots))
 
+		dbMax := workers
+		if dbMax < 1 {
+			dbMax = 1
+		}
+		sharedDB, err := openVecDB(ctx, dbPathVal, dbMax)
+		if err != nil {
+			log.Fatalf("search: open db: %v", err)
+		}
+		svc, err := service.NewService(service.WithDB(sharedDB), service.WithEmbedder(emb))
+		if err != nil {
+			_ = sharedDB.Close()
+			log.Fatalf("service init: %v", err)
+		}
+		defer func() {
+			_ = svc.Close()
+			_ = sharedDB.Close()
+		}()
+
 		var wg sync.WaitGroup
 		for i := 0; i < workers; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				conn, ok, err := openVecConn(ctx, sharedDB)
+				if err != nil {
+					results <- searchOutcome{err: err}
+					return
+				}
+				if ok {
+					defer conn.Close()
+				}
 				for r := range jobs {
-					res, err := svc.Search(ctx, service.SearchRequest{
+					req := service.SearchRequest{
 						DBPath:   dbPathVal,
 						Dataset:  r.Name,
 						Query:    *query,
@@ -449,7 +478,16 @@ func searchCmd(args []string) {
 						Model:    *model,
 						Limit:    *limit,
 						MinScore: *minScore,
-					})
+					}
+					var (
+						res []service.SearchResult
+						err error
+					)
+					if ok {
+						res, err = svc.SearchWithConn(ctx, conn, req)
+					} else {
+						res, err = svc.Search(ctx, req)
+					}
 					results <- searchOutcome{root: r.Name, results: res, err: err}
 				}
 			}()
@@ -465,24 +503,21 @@ func searchCmd(args []string) {
 		}()
 
 		outcomes := make(map[string]searchOutcome, len(roots))
-		var firstErr error
 		for res := range results {
 			outcomes[res.root] = res
-			if res.err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("root=%s: %w", res.root, res.err)
-			}
-		}
-		if firstErr != nil {
-			log.Fatalf("search: %v", firstErr)
 		}
 		for _, r := range roots {
 			res := outcomes[r.Name]
+			if res.err != nil {
+				log.Printf("search: root=%s: %v", r.Name, res.err)
+				continue
+			}
 			for _, item := range res.results {
 				out := item.Content
 				if len(out) > 200 {
 					out = out[:200] + "..."
 				}
-				fmt.Printf("root=%s id=%s score=%.4f path=%s\n%s\n\n", r.Name, item.ID, item.Score, item.Path, out)
+				fmt.Printf("root=%s id=%s score=%.4f distance=%.4f path=%s\n%s\n\n", r.Name, item.ID, item.Score, 1-item.Score, item.Path, out)
 			}
 		}
 		return
@@ -509,7 +544,7 @@ func searchCmd(args []string) {
 		if len(out) > 200 {
 			out = out[:200] + "..."
 		}
-		fmt.Printf("id=%s score=%.4f path=%s\n%s\n\n", item.ID, item.Score, item.Path, out)
+		fmt.Printf("id=%s score=%.4f distance=%.4f path=%s\n%s\n\n", item.ID, item.Score, 1-item.Score, item.Path, out)
 	}
 }
 
@@ -611,6 +646,73 @@ func resolveConfigPath(flagValue string) string {
 		return path
 	}
 	return ""
+}
+
+func openVecDB(ctx context.Context, dsn string, maxOpen int) (*sql.DB, error) {
+	db, err := engine.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if maxOpen < 1 {
+		maxOpen = 1
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxOpen)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	if err := vec.Register(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	_ = conn.Close()
+	return db, nil
+}
+
+func openVecConn(ctx context.Context, db *sql.DB) (*sql.Conn, bool, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		ok, err := checkVecModule(ctx, conn)
+		if err == nil && ok {
+			return conn, true, nil
+		}
+		_ = conn.Close()
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("vec module not available on connection")
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("vec module not available on connection")
+	}
+	return nil, false, lastErr
+}
+
+func checkVecModule(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var one int
+	if err := conn.QueryRowContext(ctx, "SELECT 1 FROM pragma_module_list WHERE name = 'vec'").Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "no such table: pragma_module_list") ||
+			strings.Contains(msg, "no such column: name") ||
+			strings.Contains(msg, "syntax error") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func selectEmbedder(name, apiKey, model string) embeddings.Embedder {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/sqlite-vec/engine"
@@ -35,6 +36,7 @@ type Service struct {
 	db       *sql.DB
 	dsn      string
 	embedder embeddings.Embedder
+	mu       sync.Mutex
 }
 
 // NewService creates a new Service.
@@ -55,6 +57,8 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) ensureDB(ctx context.Context, dsn string, withAdmin bool) (*sql.DB, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.db != nil {
 		if err := vec.Register(s.db); err != nil {
 			return nil, err
@@ -113,6 +117,13 @@ func ensureSchemaConn(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn, err = ensureVecModule(ctx, db, conn)
+	if err != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, err
+	}
 	if err := ensureSchema(ctx, conn); err != nil {
 		if strings.Contains(err.Error(), "no such module: vec") {
 			_ = conn.Close()
@@ -121,6 +132,13 @@ func ensureSchemaConn(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
 			}
 			conn, err = db.Conn(ctx)
 			if err != nil {
+				return nil, err
+			}
+			conn, err = ensureVecModule(ctx, db, conn)
+			if err != nil {
+				if conn != nil {
+					_ = conn.Close()
+				}
 				return nil, err
 			}
 			if err := ensureSchema(ctx, conn); err != nil {
@@ -133,4 +151,50 @@ func ensureSchemaConn(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+func ensureVecModule(ctx context.Context, db *sql.DB, conn *sql.Conn) (*sql.Conn, error) {
+	available, err := checkVecModule(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if available {
+		return conn, nil
+	}
+	_ = conn.Close()
+	if err := vec.Register(db); err != nil {
+		return nil, err
+	}
+	conn, err = db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	available, err = checkVecModule(ctx, conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if available {
+		return conn, nil
+	}
+	// Unable to validate module availability; proceed and let callers handle fallbacks.
+	return conn, nil
+}
+
+func checkVecModule(ctx context.Context, conn *sql.Conn) (bool, error) {
+	var one int
+	if err := conn.QueryRowContext(ctx, "SELECT 1 FROM pragma_module_list WHERE name = 'vec'").Scan(&one); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "no such table: pragma_module_list") ||
+			strings.Contains(msg, "no such table: pragma_module_list") ||
+			strings.Contains(msg, "no such column: name") ||
+			strings.Contains(msg, "syntax error") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
