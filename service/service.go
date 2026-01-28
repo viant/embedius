@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/sqlite-vec/engine"
 	"github.com/viant/sqlite-vec/vec"
@@ -76,12 +77,10 @@ func (s *Service) ensureDB(ctx context.Context, dsn string, withAdmin bool) (*sq
 	if dsn == "" {
 		return nil, fmt.Errorf("sqlite dsn required")
 	}
-	bd, err := engine.Open(dsn)
+	bd, err := engine.Open(sqliteutil.EnsurePragmas(dsn, true, 5000))
 	if err != nil {
 		return nil, err
 	}
-	bd.SetMaxOpenConns(4)
-	bd.SetMaxIdleConns(4)
 	bd.SetConnMaxLifetime(0)
 	bd.SetConnMaxIdleTime(0)
 	if err := vec.Register(bd); err != nil {

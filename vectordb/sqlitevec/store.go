@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/indexer/fs"
 	"github.com/viant/embedius/schema"
@@ -98,9 +99,11 @@ func WithBusyTimeout(ms int) Option {
 // NewStore opens/initializes a sqlite-vec Store.
 func NewStore(opts ...Option) (*Store, error) {
 	s := &Store{
-		vtable:       "emb_docs",
-		ensureSchema: true,
-		embedBatch:   64,
+		vtable:        "emb_docs",
+		ensureSchema:  true,
+		embedBatch:    64,
+		walEnabled:    true,
+		busyTimeoutMS: 5000,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -114,13 +117,11 @@ func NewStore(opts ...Option) (*Store, error) {
 		if s.dsn == "" {
 			return nil, fmt.Errorf("sqlitevec: dsn required")
 		}
-		db, err := engine.Open(s.dsn)
+		db, err := engine.Open(sqliteutil.EnsurePragmas(s.dsn, s.walEnabled, s.busyTimeoutMS))
 		if err != nil {
 			return nil, err
 		}
 		s.db = db
-		s.db.SetMaxOpenConns(10)
-		s.db.SetMaxIdleConns(10)
 		s.openedLocally = true
 	}
 	if err := vec.Register(s.db); err != nil {

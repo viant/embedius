@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/gops/agent"
+	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/embeddings/openai"
 	"github.com/viant/embedius/service"
@@ -438,11 +439,7 @@ func searchCmd(args []string) {
 		jobs := make(chan service.RootSpec)
 		results := make(chan searchOutcome, len(roots))
 
-		dbMax := workers
-		if dbMax < 1 {
-			dbMax = 1
-		}
-		sharedDB, err := openVecDB(ctx, dbPathVal, dbMax)
+		sharedDB, err := openVecDB(ctx, dbPathVal)
 		if err != nil {
 			log.Fatalf("search: open db: %v", err)
 		}
@@ -648,16 +645,11 @@ func resolveConfigPath(flagValue string) string {
 	return ""
 }
 
-func openVecDB(ctx context.Context, dsn string, maxOpen int) (*sql.DB, error) {
-	db, err := engine.Open(dsn)
+func openVecDB(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := engine.Open(sqliteutil.EnsurePragmas(dsn, true, 5000))
 	if err != nil {
 		return nil, err
 	}
-	if maxOpen < 1 {
-		maxOpen = 1
-	}
-	db.SetMaxOpenConns(maxOpen)
-	db.SetMaxIdleConns(maxOpen)
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 	if err := vec.Register(db); err != nil {

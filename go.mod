@@ -5,9 +5,11 @@ go 1.24.0
 require (
 	github.com/google/gops v0.3.28
 	github.com/minio/highwayhash v1.0.3
+	github.com/stretchr/testify v1.10.0
 	github.com/viant/afs v1.27.0
 	github.com/viant/bigquery v0.5.1
 	github.com/viant/bintly v0.2.0
+	github.com/viant/scy v0.25.0
 	github.com/viant/sqlx v0.22.0
 	golang.org/x/sys v0.37.0
 	modernc.org/sqlite v1.44.2
@@ -18,6 +20,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.2 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/aerospike/aerospike-client-go v4.5.2+incompatible // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
@@ -42,14 +45,15 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nxadm/tail v1.4.11 // indirect
 	github.com/onsi/gomega v1.39.0 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/viant/parsly v0.3.3-0.20240717150634-e1afaedb691b // indirect
-	github.com/viant/scy v0.25.0 // indirect
 	github.com/viant/structology v0.5.6-0.20240802174922-5eb157550455 // indirect
 	github.com/viant/tagly v0.2.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/otel v1.26.0 // indirect
 	go.opentelemetry.io/otel/metric v1.26.0 // indirect
 	go.opentelemetry.io/otel/trace v1.26.0 // indirect
+	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.46.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
@@ -68,13 +72,12 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.11.0 // indirect
-	github.com/viant/sqlite-vec v0.1.1-0.20260125221439-ab0835ed7e73
+	github.com/viant/sqlite-vec v0.1.1
 	github.com/viant/toolbox v0.36.0 // indirect
 	github.com/viant/vec v0.2.4-0.20250819200643-7e16b6ea443c // indirect
 	github.com/viant/xreflect v0.6.2 // indirect
 	github.com/viant/xunsafe v0.9.3-0.20240530173106-69808f27713b // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.51.0 // indirect
-	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	google.golang.org/api v0.183.0 // indirect
@@ -86,4 +89,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace modernc.org/sqlite => gitlab.com/adrianwit/sqlite v1.40.2-0.20260122162029-000bc1b9740a
+replace modernc.org/sqlite => gitlab.com/adrianwit/sqlite v1.40.2-0.20260127183639-396307fdbe7c

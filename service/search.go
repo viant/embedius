@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/sqlite-vec/engine"
 	"github.com/viant/sqlite-vec/vec"
@@ -97,12 +98,10 @@ LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
 }
 
 func (s *Service) matchWithFreshDB(ctx context.Context, req SearchRequest, blob []byte) ([]SearchResult, error) {
-	db, err := engine.Open(req.DBPath)
+	db, err := engine.Open(sqliteutil.EnsurePragmas(req.DBPath, true, 5000))
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 	if err := vec.Register(db); err != nil {
