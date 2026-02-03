@@ -1,0 +1,28 @@
+init:
+  target:
+    URL: ssh://127.0.0.1
+    Credentials: localhost
+  appPath: $WorkingDirectory(./..)
+  Ver: $Cat(${appPath}/Version)
+
+pipeline:
+  build:
+    action: exec:run
+    checkError: true
+    commands:
+      - cd ${appPath}/embedius
+      - export GOOS=linux
+      - export GOARCH=amd64
+      - go build -ldflags="-X 'main.Version=${Ver}'" -trimpath
+      - tar cvzf embedius_linux_amd64_${Ver}.tar.gz embedius
+      - export GOOS=darwin
+      - go build -ldflags="-X 'main.Version=${Ver}'" -trimpath
+      - tar cvzf embedius_darwin_amd64_${Ver}.tar.gz embedius
+      - export GOOS=darwin
+      - export GOARCH=arm64
+      - go build -ldflags="-X 'main.Version=${Ver}'" -trimpath
+      - tar cvzf embedius_darwin_arm64_${Ver}.tar.gz embedius
+      - export GOOS=windows
+      - export GOARCH=amd64
+      - go build -ldflags="-X 'main.Version=${Ver}'" -trimpath
+      - tar cvzf embedius_windows_amd64_${Ver}.tar.gz embedius.exe

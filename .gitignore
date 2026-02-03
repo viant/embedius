@@ -2,3 +2,4 @@
 local_tests/
 local_test.go
 go.sum
+embedius/embedius

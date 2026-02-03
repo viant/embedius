@@ -40,42 +40,66 @@ pipeline:
     checkError: true
     commands:
       - cd $repoPath
-      - if [ ! -x $TempDir/embedius ]; then go build -o $TempDir/embedius ./cmd/embedius; fi
-      - if [ ! -x $TempDir/seed_upstream ]; then go build -o $TempDir/seed_upstream ./e2e/seed_upstream.go; fi
-      - $TempDir/embedius index --db $DBPath --root rootA --path $RootDir --embedder simple
+      - if [ ! -x $TempDir/embedius ]; then cp $repoPath/embedius $TempDir/embedius; fi
+      - if [ ! -x $TempDir/seed_upstream ]; then cp $repoPath/seed_upstream $TempDir/seed_upstream; fi
+      - env HOME=$TempDir $TempDir/embedius index --db $DBPath --root rootA --path $RootDir --embedder simple
 
   search:
     action: exec:extract
     checkError: true
     commands:
-      - command: $TempDir/embedius search --db $DBPath --root rootA --query auth --embedder simple
+      - command: env HOME=$TempDir $TempDir/embedius search --db $DBPath --root rootA --query auth --embedder simple
         timeoutMs: 60000
+
+  mcp:
+    start:
+      action: process:start
+      directory: $repoPath
+      checkError: true
+      immuneToHangups: true
+      sleepTimeMs: 2000
+      command: env HOME=$TempDir $TempDir/embedius serve --db $DBPath --embedder simple --mcp-addr 127.0.0.1:6061
+    search:
+      action: exec:extract
+      checkError: true
+      commands:
+        - command: env HOME=$TempDir $TempDir/embedius search --root rootA --query auth --mcp-addr 127.0.0.1:6061
+          timeoutMs: 60000
+    roots:
+      action: exec:extract
+      checkError: true
+      commands:
+        - command: env HOME=$TempDir $TempDir/embedius roots --mcp-addr 127.0.0.1:6061
+          timeoutMs: 60000
+    stop:
+      action: process:stop
+      input: embedius serve --db $DBPath --embedder simple --mcp-addr 127.0.0.1:6061
 
   sync:
     seed:
       action: exec:run
       checkError: true
       commands:
-        - $TempDir/seed_upstream --db $UpPath --dataset rootA --id asset-x#0 --content 'upstream content' --path docs/u.txt --md5 deadbeef --scn 1
+        - env HOME=$TempDir $TempDir/seed_upstream --db $UpPath --dataset rootA --id asset-x#0 --content 'upstream content' --path docs/u.txt --md5 deadbeef --scn 1
     pull:
       action: exec:run
       checkError: true
       commands:
-        - $TempDir/embedius sync --db $DBPath --root rootA --upstream-driver sqlite --upstream-dsn $UpPath
+        - env HOME=$TempDir $TempDir/embedius sync --db $DBPath --root rootA --upstream-driver sqlite --upstream-dsn $UpPath
     validate:
       action: exec:extract
       checkError: true
       commands:
-        - command: $TempDir/embedius search --db $DBPath --root rootA --query upstream --embedder simple
+        - command: env HOME=$TempDir $TempDir/embedius search --db $DBPath --root rootA --query upstream --embedder simple
           timeoutMs: 60000
 
   admin:
     action: exec:extract
     checkError: true
     commands:
-      - command: $TempDir/embedius admin --db $DBPath --root rootA --action check
+      - command: env HOME=$TempDir $TempDir/embedius admin --db $DBPath --root rootA --action check
         timeoutMs: 60000
-      - command: $TempDir/embedius admin --db $DBPath --root rootA --action prune --scn 1 --force
+      - command: env HOME=$TempDir $TempDir/embedius admin --db $DBPath --root rootA --action prune --scn 1 --force
         timeoutMs: 60000
 
   include_exclude:
@@ -90,4 +114,4 @@ pipeline:
       action: exec:run
       checkError: true
       commands:
-        - $TempDir/embedius index --db $DBPath --root rootB --path $TempDir/rootB --embedder simple --include '**/*.go'
+        - env HOME=$TempDir $TempDir/embedius index --db $DBPath --root rootB --path $TempDir/rootB --embedder simple --include '**/*.go'

@@ -11,8 +11,10 @@ import (
 
 // Config defines root mappings for batch operations.
 type Config struct {
-	DB    string                `yaml:"db"`
-	Roots map[string]RootConfig `yaml:"roots"`
+	DB        string                `yaml:"db"`
+	Roots     map[string]RootConfig `yaml:"roots"`
+	Upstreams []UpstreamConfig      `yaml:"upstreams"`
+	MCPServer MCPServerConfig       `yaml:"mcpServer"`
 }
 
 // RootConfig defines per-root settings.
@@ -21,6 +23,25 @@ type RootConfig struct {
 	Include      []string `yaml:"include"`
 	Exclude      []string `yaml:"exclude"`
 	MaxSizeBytes int64    `yaml:"max_size_bytes"`
+	UpstreamRef  string   `yaml:"upstreamRef"`
+}
+
+// UpstreamConfig defines upstream sync settings.
+type UpstreamConfig struct {
+	Name               string `yaml:"name"`
+	Driver             string `yaml:"driver"`
+	DSN                string `yaml:"dsn"`
+	Shadow             string `yaml:"shadow"`
+	Batch              int    `yaml:"batch"`
+	Force              bool   `yaml:"force"`
+	Enabled            bool   `yaml:"enabled"`
+	MinIntervalSeconds int    `yaml:"minIntervalSeconds"`
+}
+
+// MCPServerConfig defines MCP server settings.
+type MCPServerConfig struct {
+	Addr string `yaml:"addr"`
+	Port int    `yaml:"port"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -49,6 +70,24 @@ func LoadConfig(path string) (*Config, error) {
 				cfg.Roots[name] = RootConfig{Path: p}
 			}
 		}
+	}
+	if cfg.DB != "" {
+		if expanded, err := expandUserPath(cfg.DB); err == nil {
+			cfg.DB = expanded
+		} else {
+			return nil, err
+		}
+	}
+	for name, root := range cfg.Roots {
+		if root.Path == "" {
+			continue
+		}
+		expanded, err := expandUserPath(root.Path)
+		if err != nil {
+			return nil, err
+		}
+		root.Path = expanded
+		cfg.Roots[name] = root
 	}
 	return &cfg, nil
 }

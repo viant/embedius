@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/google/gops/agent"
+	retriever "github.com/viant/embedius"
 	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
 	"github.com/viant/embedius/embeddings/openai"
+	"github.com/viant/embedius/mcp"
 	"github.com/viant/embedius/service"
 	"github.com/viant/sqlite-vec/engine"
 	"github.com/viant/sqlite-vec/vec"
@@ -30,14 +32,18 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if isVersionArg(os.Args[1]) {
+		fmt.Printf("embedius %s\n", buildVersion())
+		return
+	}
 
 	switch os.Args[1] {
 	case "index":
 		indexCmd(os.Args[2:])
 	case "search":
 		searchCmd(os.Args[2:])
-	case "query":
-		searchCmd(os.Args[2:])
+	case "serve":
+		serveCmd(os.Args[2:])
 	case "roots":
 		rootsCmd(os.Args[2:])
 	case "sync":
@@ -55,10 +61,29 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  index   Index a root folder into SQLite (sqlite-vec)")
 	fmt.Fprintln(os.Stderr, "  search  Query embeddings from SQLite (sqlite-vec)")
-	fmt.Fprintln(os.Stderr, "  query   Alias for search (use --prompt or --query)")
+	fmt.Fprintln(os.Stderr, "  serve   Run MCP server for search/roots")
 	fmt.Fprintln(os.Stderr, "  roots   Show root metadata summary")
 	fmt.Fprintln(os.Stderr, "  sync    Pull upstream SCN changes into local SQLite")
 	fmt.Fprintln(os.Stderr, "  admin   Maintenance tasks (rebuild/invalidate/prune/check)")
+	fmt.Fprintln(os.Stderr, "  -v, --version  Print version")
+	fmt.Fprintln(os.Stderr, "Tip: use 'embedius <command> -h' to see command options (including --mcp-addr).")
+}
+
+func isVersionArg(arg string) bool {
+	switch strings.TrimSpace(arg) {
+	case "-v", "--version", "version":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildVersion() string {
+	v := strings.TrimSpace(retriever.Version)
+	if v == "" {
+		v = "dev"
+	}
+	return v
 }
 
 func indexCmd(args []string) {
@@ -369,6 +394,7 @@ func searchCmd(args []string) {
 	flags := flag.NewFlagSet("search", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote search")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (required unless --all)")
 	allRoots := flags.Bool("all", false, "search all roots in config (requires --config)")
@@ -386,7 +412,7 @@ func searchCmd(args []string) {
 	if *query == "" && *prompt != "" {
 		*query = *prompt
 	}
-	if *query == "" || (!*allRoots && *root == "") {
+	if *query == "" || (!*allRoots && *root == "" && *mcpAddr == "") {
 		flags.Usage()
 		os.Exit(2)
 	}
@@ -396,9 +422,20 @@ func searchCmd(args []string) {
 	maybeDebugSleep("search", *debugSleep)
 
 	configPathVal := resolveConfigPath(*configPath)
+	var cfg *service.Config
 	var roots []service.RootSpec
 	var cfgDB string
-	if configPathVal != "" || *allRoots {
+	if configPathVal != "" {
+		var err error
+		cfg, err = service.LoadConfig(configPathVal)
+		if err != nil {
+			log.Fatalf("load config: %v", err)
+		}
+		cfgDB = cfg.DB
+	}
+	resolvedMCP := resolveMCPAddrFromConfig(*mcpAddr, cfg)
+	skipResolve := resolvedMCP != "" && (*root == "" || *allRoots)
+	if (configPathVal != "" || *allRoots) && !skipResolve {
 		if configPathVal == "" {
 			log.Fatalf("search: --all requires --config or ~/embedius/config.yaml")
 		}
@@ -413,6 +450,33 @@ func searchCmd(args []string) {
 			log.Fatalf("resolve roots: %v", err)
 		}
 	}
+	if resolvedMCP != "" {
+		if *root == "" {
+			merged, err := mcpSearchAll(ctx, resolvedMCP, *query, *limit, *minScore, *model)
+			if err != nil {
+				log.Fatalf("search: %v", err)
+			}
+			printSearchResults(merged)
+			return
+		}
+		rootName := *root
+		if len(roots) > 0 {
+			rootName = roots[0].Name
+		}
+		out, err := mcpSearch(ctx, resolvedMCP, &mcp.SearchInput{
+			Root:     rootName,
+			Query:    *query,
+			Limit:    *limit,
+			MinScore: *minScore,
+			Model:    *model,
+		})
+		if err != nil {
+			log.Fatalf("search: %v", err)
+		}
+		printSearchResults(out.Results)
+		return
+	}
+
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
 	if dbPathVal == "" {
 		flags.Usage()
@@ -536,6 +600,10 @@ func searchCmd(args []string) {
 	if err != nil {
 		log.Fatalf("search: %v", err)
 	}
+	printSearchResults(results)
+}
+
+func printSearchResults(results []service.SearchResult) {
 	for _, item := range results {
 		out := item.Content
 		if len(out) > 200 {
@@ -549,29 +617,74 @@ func rootsCmd(args []string) {
 	flags := flag.NewFlagSet("roots", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (required)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote roots")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (optional)")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
 
+	var cfg *service.Config
 	var cfgDB string
 	configPathVal := resolveConfigPath(*configPath)
 	if configPathVal != "" {
-		cfg, err := service.LoadConfig(configPathVal)
+		var err error
+		cfg, err = service.LoadConfig(configPathVal)
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
 		cfgDB = cfg.DB
 	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	maybeDebugSleep("roots", *debugSleep)
+
+	resolvedMCP := resolveMCPAddrFromConfig(*mcpAddr, cfg)
+	if resolvedMCP != "" {
+		out, err := mcpRoots(ctx, resolvedMCP, &mcp.RootsInput{Root: *root})
+		if err != nil {
+			log.Fatalf("roots: %v", err)
+		}
+		for _, info := range out.Roots {
+			lastIdx := ""
+			if info.LastIndexedAt.Valid {
+				lastIdx = info.LastIndexedAt.String
+			}
+			lastAssetModStr := ""
+			if info.LastAssetMod.Valid {
+				lastAssetModStr = info.LastAssetMod.String
+			}
+			lastAssetMD5Str := ""
+			if info.LastAssetMD5.Valid {
+				lastAssetMD5Str = info.LastAssetMD5.String
+			}
+			avgDocLenVal := 0.0
+			if info.AvgDocLen.Valid {
+				avgDocLenVal = info.AvgDocLen.Float64
+			}
+			lastDocSCNVal := int64(0)
+			if info.LastDocSCN.Valid {
+				lastDocSCNVal = info.LastDocSCN.Int64
+			}
+			embeddingModelStr := ""
+			if info.EmbeddingModel.Valid {
+				embeddingModelStr = info.EmbeddingModel.String
+			}
+			upstreamShadowStr := ""
+			if info.UpstreamShadow.Valid {
+				upstreamShadowStr = info.UpstreamShadow.String
+			}
+			fmt.Printf("root=%s path=%s scn=%d assets=%d archived_assets=%d active_assets=%d docs=%d archived_docs=%d active_docs=%d size=%d avg_doc_len=%.2f last_doc_scn=%d last_asset_mod=%s last_asset_md5=%s last_indexed=%s embedding_model=%s last_sync_scn=%d upstream_shadow=%s\n",
+				info.DatasetID, info.SourceURI, info.LastSCN, info.Assets, info.AssetsArchived, info.AssetsActive, info.Documents, info.DocsArchived, info.DocsActive, info.AssetsSize, avgDocLenVal, lastDocSCNVal, lastAssetModStr, lastAssetMD5Str, lastIdx, embeddingModelStr, info.LastSyncSCN, upstreamShadowStr)
+		}
+		return
+	}
+
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	maybeDebugSleep("roots", *debugSleep)
 
 	svc, err := service.NewService(service.WithDSN(dbPathVal))
 	if err != nil {
