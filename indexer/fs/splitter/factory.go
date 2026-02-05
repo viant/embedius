@@ -50,6 +50,8 @@ func NewFactory(defaultMaxSize int) *Factory {
 	factory.RegisterExtensionSplitter(".js", NewCodeSplitter(defaultMaxSize, "javascript"))
 	factory.RegisterExtensionSplitter(".ts", NewCodeSplitter(defaultMaxSize, "typescript"))
 	factory.RegisterExtensionSplitter(".md", NewMarkdownSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".pdf", NewPDFSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".docx", NewDOCXSplitter(defaultMaxSize))
 	return factory
 }
 

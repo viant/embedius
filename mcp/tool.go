@@ -19,6 +19,18 @@ var descSearch string
 //go:embed tools/roots.md
 var descRoots string
 
+//go:embed tools/list.md
+var descList string
+
+//go:embed tools/read.md
+var descRead string
+
+//go:embed tools/grepfiles.md
+var descGrepFiles string
+
+//go:embed tools/match.md
+var descMatch string
+
 func registerTools(registry *protoserver.Registry, h *Handler) error {
 	if err := protoserver.RegisterTool[*SearchInput, *SearchOutput](registry, "search", descSearch, func(ctx context.Context, in *SearchInput) (*schema.CallToolResult, *jsonrpc.Error) {
 		out, err := h.search(ctx, in)
@@ -32,6 +44,46 @@ func registerTools(registry *protoserver.Registry, h *Handler) error {
 
 	if err := protoserver.RegisterTool[*RootsInput, *RootsOutput](registry, "roots", descRoots, func(ctx context.Context, in *RootsInput) (*schema.CallToolResult, *jsonrpc.Error) {
 		out, err := h.roots(ctx, in)
+		if err != nil {
+			return buildErrorResult(err.Error())
+		}
+		return buildSuccessResult(out)
+	}); err != nil {
+		return err
+	}
+
+	if err := protoserver.RegisterTool[*ListInput, *ListOutput](registry, "list", descList, func(ctx context.Context, in *ListInput) (*schema.CallToolResult, *jsonrpc.Error) {
+		out, err := h.list(ctx, in)
+		if err != nil {
+			return buildErrorResult(err.Error())
+		}
+		return buildSuccessResult(out)
+	}); err != nil {
+		return err
+	}
+
+	if err := protoserver.RegisterTool[*ReadInput, *ReadOutput](registry, "read", descRead, func(ctx context.Context, in *ReadInput) (*schema.CallToolResult, *jsonrpc.Error) {
+		out, err := h.read(ctx, in)
+		if err != nil {
+			return buildErrorResult(err.Error())
+		}
+		return buildSuccessResult(out)
+	}); err != nil {
+		return err
+	}
+
+	if err := protoserver.RegisterTool[*GrepInput, *GrepOutput](registry, "grepFiles", descGrepFiles, func(ctx context.Context, in *GrepInput) (*schema.CallToolResult, *jsonrpc.Error) {
+		out, err := h.grepFiles(ctx, in)
+		if err != nil {
+			return buildErrorResult(err.Error())
+		}
+		return buildSuccessResult(out)
+	}); err != nil {
+		return err
+	}
+
+	if err := protoserver.RegisterTool[*MatchInput, *MatchOutput](registry, "match", descMatch, func(ctx context.Context, in *MatchInput) (*schema.CallToolResult, *jsonrpc.Error) {
+		out, err := h.match(ctx, in)
 		if err != nil {
 			return buildErrorResult(err.Error())
 		}

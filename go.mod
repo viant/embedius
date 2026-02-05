@@ -1,17 +1,18 @@
 module github.com/viant/embedius
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/google/gops v0.3.28
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/minio/highwayhash v1.0.3
 	github.com/stretchr/testify v1.11.1
 	github.com/viant/afs v1.27.0
 	github.com/viant/bigquery v0.5.1
 	github.com/viant/bintly v0.2.0
 	github.com/viant/jsonrpc v0.17.0
-	github.com/viant/mcp v0.9.0
-	github.com/viant/mcp-protocol v0.9.0
+	github.com/viant/mcp v0.10.0
+	github.com/viant/mcp-protocol v0.10.0
 	github.com/viant/scy v0.25.0
 	github.com/viant/sqlx v0.22.0
 	golang.org/x/sys v0.37.0

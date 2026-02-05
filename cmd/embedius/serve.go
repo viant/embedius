@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ func serveCmd(args []string) {
 	configPathVal := resolveConfigPath(*configPath)
 	var cfg *service.Config
 	var cfgDB string
+	var rootSpecs map[string]service.RootSpec
 	if configPathVal != "" {
 		var err error
 		cfg, err = service.LoadConfig(configPathVal)
@@ -44,6 +46,7 @@ func serveCmd(args []string) {
 			log.Fatalf("load config: %v", err)
 		}
 		cfgDB = cfg.DB
+		rootSpecs = buildRootSpecs(cfg)
 	}
 
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
@@ -74,7 +77,7 @@ func serveCmd(args []string) {
 
 	server, err := mcpsrv.New(
 		mcpsrv.WithImplementation(schema.Implementation{Name: "embedius-mcp", Version: "0.1.0"}),
-		mcpsrv.WithNewHandler(emcp.NewHandler(svc, dbPathVal, emb, *model)),
+		mcpsrv.WithNewHandler(emcp.NewHandler(svc, dbPathVal, emb, *model, rootSpecs)),
 		mcpsrv.WithEndpointAddress(addr),
 		mcpsrv.WithRootRedirect(true),
 		mcpsrv.WithStreamableURI("/mcp"),
@@ -196,6 +199,29 @@ func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.C
 			runSyncLoop(ctx, svc, dbPath, job.up, job.roots)
 		}()
 	}
+}
+
+func buildRootSpecs(cfg *service.Config) map[string]service.RootSpec {
+	if cfg == nil || len(cfg.Roots) == 0 {
+		return nil
+	}
+	out := make(map[string]service.RootSpec, len(cfg.Roots))
+	for name, root := range cfg.Roots {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(root.Path) == "" {
+			continue
+		}
+		out[name] = service.RootSpec{
+			Name:         name,
+			Path:         root.Path,
+			Include:      root.Include,
+			Exclude:      root.Exclude,
+			MaxSizeBytes: root.MaxSizeBytes,
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func runSyncLoop(ctx context.Context, svc *service.Service, dbPath string, up service.UpstreamConfig, roots []service.RootSpec) {
