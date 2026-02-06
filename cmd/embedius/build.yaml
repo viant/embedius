@@ -2,7 +2,7 @@ init:
   target:
     URL: ssh://127.0.0.1
     Credentials: localhost
-  appPath: $WorkingDirectory(./..)
+  appPath: $WorkingDirectory(./../..)
   Ver: $Cat(${appPath}/Version)
 
 pipeline:
@@ -10,7 +10,7 @@ pipeline:
     action: exec:run
     checkError: true
     commands:
-      - cd ${appPath}/embedius
+      - cd ${appPath}/cmd/embedius
       - export GOOS=linux
       - export GOARCH=amd64
       - go build -ldflags="-X 'main.Version=${Ver}'" -trimpath
