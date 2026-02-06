@@ -6,6 +6,16 @@ type md5ContextKey struct{}
 type indexRootKey struct{}
 type assetMetaKey struct{}
 type indexBaseKey struct{}
+type indexStatsKey struct{}
+
+// IndexStats tracks indexing progress for a root scan.
+type IndexStats struct {
+	Total     int
+	Processed int
+	Unchanged int
+	Changed   int
+	Docs      int
+}
 
 // WithExistingMD5s attaches a map of known md5 hashes to the context.
 func WithExistingMD5s(ctx context.Context, md5s map[string]bool) context.Context {
@@ -83,4 +93,22 @@ func indexBase(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// WithIndexStats attaches a shared stats tracker to the context.
+func WithIndexStats(ctx context.Context, stats *IndexStats) context.Context {
+	if ctx == nil || stats == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, indexStatsKey{}, stats)
+}
+
+func indexStats(ctx context.Context) *IndexStats {
+	if ctx == nil {
+		return nil
+	}
+	if v, ok := ctx.Value(indexStatsKey{}).(*IndexStats); ok {
+		return v
+	}
+	return nil
 }

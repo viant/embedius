@@ -126,6 +126,14 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 	processed := 0
 	nextLog := 1000
 	totalCandidates := 0
+	var stats *IndexStats
+	if logProgress {
+		stats = indexStats(ctx)
+		if stats == nil {
+			stats = &IndexStats{}
+			ctx = WithIndexStats(ctx, stats)
+		}
+	}
 
 	if checker, ok := i.fs.(SnapshotStateChecker); ok {
 		upToDate, err := checker.SnapshotUpToDate(ctx, norm)
@@ -170,6 +178,9 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 			}
 			totalCandidates++
 		}
+		if stats != nil {
+			stats.Total = totalCandidates
+		}
 	}
 
 	for _, object := range objects {
@@ -207,13 +218,30 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 		toRemove = append(toRemove, ids...)
 		if logProgress {
 			processed++
+			if stats != nil {
+				stats.Processed = processed
+				if len(docs) == 0 && len(ids) == 0 {
+					stats.Unchanged++
+				} else {
+					stats.Changed++
+					stats.Docs += len(docs)
+				}
+			}
 			if processed%nextLog == 0 {
-				fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
+				if stats != nil {
+					fmt.Printf("embedius: index progress location=%q processed=%d total=%d unchanged=%d changed=%d docs=%d\n", location, processed, totalCandidates, stats.Unchanged, stats.Changed, stats.Docs)
+				} else {
+					fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
+				}
 			}
 		}
 	}
 	if logProgress && totalCandidates > 0 && processed != totalCandidates {
-		fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
+		if stats != nil {
+			fmt.Printf("embedius: index progress location=%q processed=%d total=%d unchanged=%d changed=%d docs=%d\n", location, processed, totalCandidates, stats.Unchanged, stats.Changed, stats.Docs)
+		} else {
+			fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
+		}
 	}
 
 	return toAddDocuments, toRemove, nil
