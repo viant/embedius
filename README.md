@@ -48,7 +48,7 @@ embedius index --config /path/to/roots.yaml --all
 # Force --db even when config has db:
 embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite --db-force
 
-# roots.yaml
+# roots.yaml (or default ~/embedius/config.yaml if present)
 # db: /tmp/vec.sqlite
 # roots:
 #   abc:
@@ -62,12 +62,23 @@ embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite --db-forc
 #     max_size_bytes: 10485760
 #   def:
 #     path: /abs/path/to/def
+#   etl:
+#     path: /abs/path/to/etl
+#     include:
+#       - "**/*.go"
+#       - "**/*.sql"
+#       - "**/*.dql"
+#       - "**/*.mod"
+#     exclude:
+#       - "**/*_test.go"
+#     max_size_bytes: 1048576
 
 # Query
 embedius search --db /tmp/vec.sqlite --root abc --query "how does auth work?"
 
-# Query using config
+# Query using config (defaults to ~/embedius/config.yaml when present)
 embedius search --config /path/to/roots.yaml --root abc --query "how does auth work?"
+embedius search --root abc --query "how does auth work?"
 
 # Debug hold (for gops/pprof attach)
 embedius search --db /tmp/vec.sqlite --root abc --query "auth" --embedder simple --debug-sleep 60
@@ -114,6 +125,61 @@ embedius admin --config /path/to/roots.yaml --all --action rebuild --db /tmp/vec
 # Build with upstream drivers
 go build -tags mysql ./cmd/embedius
 go build -tags postgres ./cmd/embedius
+```
+
+## MCP Server (serve + remote search)
+
+Start the MCP server (metrics logging is off by default; enable with `--metrics-log`):
+
+```bash
+embedius serve --config /path/to/roots.yaml --db /tmp/vec.sqlite
+
+# With metrics logging enabled
+embedius serve --config /path/to/roots.yaml --db /tmp/vec.sqlite --metrics-log
+```
+
+Query the MCP server from the CLI:
+
+```bash
+time ./embedius search -all -query='supply constrants' -mcp-addr='127.0.0.1:6061'
+```
+
+## Config Reference
+
+Embedius looks for `~/embedius/config.yaml` by default if `--config` is not provided.
+
+Example:
+
+```yaml
+db: /tmp/vec.sqlite
+roots:
+  etl:
+    path: /abs/path/to/etl
+    include:
+      - "**/*.go"
+      - "**/*.sql"
+      - "**/*.dql"
+      - "**/*.mod"
+    exclude:
+      - "**/*_test.go"
+    max_size_bytes: 1048576
+  newui:
+    path: /abs/path/to/newui
+    include:
+      - "**/*.ts"
+      - "**/*.html"
+      - "**/*.scss"
+      - "**/*.css"
+      - "**/*.json"
+    exclude:
+      - "**/*.spec.ts"
+      - "**/*.test.ts"
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/build/**"
+      - "**/.angular/**"
+      - "**/.cache/**"
+    max_size_bytes: 1048576
 ```
 
 ## Endly E2E
