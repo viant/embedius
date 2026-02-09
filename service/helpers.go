@@ -122,10 +122,10 @@ func newMatcher(spec RootSpec) *matching.Manager {
 	var opts []option.Option
 	opts = append(opts, option.WithDefaultExclusionPatterns())
 	if len(spec.Include) > 0 {
-		opts = append(opts, option.WithInclusionPatterns(spec.Include...))
+		opts = append(opts, option.WithInclusionPatterns(gitifyPatterns(spec.Include)...))
 	}
 	if len(spec.Exclude) > 0 {
-		opts = append(opts, option.WithExclusionPatterns(spec.Exclude...))
+		opts = append(opts, option.WithExclusionPatterns(gitifyPatterns(spec.Exclude)...))
 	}
 	if spec.MaxSizeBytes > 0 {
 		if spec.MaxSizeBytes > int64(int(^uint(0)>>1)) {
@@ -134,6 +134,37 @@ func newMatcher(spec RootSpec) *matching.Manager {
 		opts = append(opts, option.WithMaxIndexableSize(int(spec.MaxSizeBytes)))
 	}
 	return matching.New(opts...)
+}
+
+func gitifyPatterns(patterns []string) []string {
+	out := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		negated := strings.HasPrefix(pattern, "!")
+		if negated {
+			pattern = strings.TrimSpace(strings.TrimPrefix(pattern, "!"))
+			if pattern == "" {
+				continue
+			}
+		}
+		if strings.HasPrefix(pattern, "git:") {
+			if negated {
+				out = append(out, "!"+pattern)
+			} else {
+				out = append(out, pattern)
+			}
+			continue
+		}
+		if negated {
+			out = append(out, "!git:"+pattern)
+		} else {
+			out = append(out, "git:"+pattern)
+		}
+	}
+	return out
 }
 
 func newSyncFilter(spec RootSpec) func(path string, meta string) bool {

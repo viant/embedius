@@ -45,6 +45,9 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 		if req.Logf != nil {
 			req.Logf("sync root=%s starting", spec.Name)
 		}
+		if err := ensureDataset(ctx, db, spec.Name, spec.Path); err != nil {
+			return err
+		}
 		if err := upsertRootConfig(ctx, db, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
 			return err
 		}

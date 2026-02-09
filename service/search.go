@@ -62,6 +62,47 @@ func (s *Service) searchWithConn(ctx context.Context, conn *sql.Conn, req Search
 		return nil, fmt.Errorf("embedder returned %d vectors for 1 query", len(vecs))
 	}
 	qvec := vecs[0]
+	return s.searchWithPrepared(ctx, conn, req, qvec, db)
+}
+
+// SearchWithEmbedding performs a search using a precomputed query embedding.
+func (s *Service) SearchWithEmbedding(ctx context.Context, req SearchRequest, qvec []float32) ([]SearchResult, error) {
+	if req.Dataset == "" || req.Query == "" {
+		return nil, fmt.Errorf("dataset and query are required")
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	if len(qvec) == 0 {
+		return nil, fmt.Errorf("query embedding is required")
+	}
+	db, err := s.ensureDB(ctx, req.DBPath, false)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := ensureSchemaConn(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	return s.searchWithPrepared(ctx, conn, req, qvec, db)
+}
+
+// SearchWithConnAndEmbedding performs a search using a precomputed embedding and existing connection.
+func (s *Service) SearchWithConnAndEmbedding(ctx context.Context, conn *sql.Conn, req SearchRequest, qvec []float32) ([]SearchResult, error) {
+	if req.Dataset == "" || req.Query == "" {
+		return nil, fmt.Errorf("dataset and query are required")
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	if len(qvec) == 0 {
+		return nil, fmt.Errorf("query embedding is required")
+	}
+	return s.searchWithPrepared(ctx, conn, req, qvec, nil)
+}
+
+func (s *Service) searchWithPrepared(ctx context.Context, conn *sql.Conn, req SearchRequest, qvec []float32, db *sql.DB) ([]SearchResult, error) {
 	blob, err := vector.EncodeEmbedding(qvec)
 	if err != nil {
 		return nil, err

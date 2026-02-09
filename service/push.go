@@ -64,6 +64,20 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 		if req.Logf != nil {
 			req.Logf("sync root=%s starting", spec.Name)
 		}
+		if err := ensureDataset(ctx, local, spec.Name, spec.Path); err != nil {
+			return err
+		}
+		if err := upsertRootConfig(ctx, local, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+			return err
+		}
+		if req.DownstreamReset {
+			if err := resetDownstreamState(ctx, local, down, spec.Name, req.DownstreamShadow, req.ApplyDownstream, dialect, req.Logf); err != nil {
+				return err
+			}
+		}
+		if err := reconcileDownstreamBaseline(ctx, local, down, spec.Name, req.DownstreamShadow, dialect, req.Logf); err != nil {
+			return err
+		}
 		if req.Logf != nil {
 			if pending, maxSCN, err := localPending(ctx, local, spec.Name, req.DownstreamShadow); err == nil {
 				req.Logf("sync root=%s shadow=%s start last_scn=%d pending=%d max_scn=%d", spec.Name, req.DownstreamShadow, pending.lastSCN, pending.count, maxSCN)
@@ -194,7 +208,7 @@ LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 }
 
 func execSingleInsert(ctx context.Context, downstream *sql.DB, cfg pushConfig, batch []pushRow, count, batchUpdate, batchDelete, totalUpdate, totalDelete *int) error {
-	insertQuery := `INSERT INTO vec_shadow_log(dataset_id, shadow_table, scn, op, document_id, payload, created_at)
+	insertQuery := insertShadowLogPrefix(cfg.Dialect) + ` INTO vec_shadow_log(dataset_id, shadow_table, scn, op, document_id, payload, created_at)
 VALUES(?,?,?,?,?,?,?)`
 	for _, row := range batch {
 		payload, err := buildPushPayload(cfg.DatasetID, row.id, row.content, row.meta, row.embedding, row.model, row.scn, row.archived)
@@ -256,7 +270,7 @@ func buildBatchInsert(cfg pushConfig, batch []pushRow) (string, []any, error) {
 		values = append(values, "(?,?,?,?,?,?,?)")
 		args = append(args, cfg.DatasetID, cfg.ShadowTable, row.scn, op, row.id, payload, time.Now())
 	}
-	query := "INSERT INTO vec_shadow_log(dataset_id, shadow_table, scn, op, document_id, payload, created_at) VALUES " + strings.Join(values, ",")
+	query := insertShadowLogPrefix(cfg.Dialect) + " INTO vec_shadow_log(dataset_id, shadow_table, scn, op, document_id, payload, created_at) VALUES " + strings.Join(values, ",")
 	if cfg.Dialect != nil {
 		query = cfg.Dialect.EnsurePlaceholders(query)
 	}
@@ -283,6 +297,132 @@ WHERE dataset_id = ? AND scn > ?`, datasetID, lastSCN).Scan(&maxSCN, &count)
 		return pendingStats{}, 0, err
 	}
 	return pendingStats{lastSCN: lastSCN, count: count}, maxSCN, nil
+}
+
+func insertShadowLogPrefix(dialect *info.Dialect) string {
+	if dialect != nil && strings.EqualFold(dialect.Name, "mysql") {
+		return "INSERT IGNORE"
+	}
+	return "INSERT"
+}
+
+func resetDownstreamState(ctx context.Context, local *sql.DB, downstream *sql.DB, datasetID, shadowTable string, applyDownstream bool, dialect *info.Dialect, logf func(format string, args ...any)) error {
+	if err := deleteDownstreamShadowLog(ctx, downstream, datasetID, shadowTable, dialect); err != nil {
+		return err
+	}
+	if applyDownstream {
+		if err := deleteDownstreamMaterialized(ctx, downstream, datasetID, dialect); err != nil {
+			return err
+		}
+	}
+	if err := deleteLocalSyncState(ctx, local, datasetID, shadowTable, applyDownstream); err != nil {
+		return err
+	}
+	if logf != nil {
+		logf("sync root=%s shadow=%s downstream reset complete", datasetID, shadowTable)
+	}
+	return nil
+}
+
+func deleteDownstreamShadowLog(ctx context.Context, downstream *sql.DB, datasetID, shadowTable string, dialect *info.Dialect) error {
+	query := `DELETE FROM vec_shadow_log WHERE dataset_id = ? AND shadow_table = ?`
+	if dialect != nil {
+		query = dialect.EnsurePlaceholders(query)
+	}
+	_, err := downstream.ExecContext(ctx, query, datasetID, shadowTable)
+	return err
+}
+
+func deleteDownstreamMaterialized(ctx context.Context, downstream *sql.DB, datasetID string, dialect *info.Dialect) error {
+	tables := []string{
+		"shadow_vec_docs",
+		"emb_asset",
+		"emb_root",
+		"emb_root_config",
+		"vec_dataset",
+		"vec_dataset_scn",
+	}
+	for _, table := range tables {
+		query := "DELETE FROM " + table + " WHERE dataset_id = ?"
+		if dialect != nil {
+			query = dialect.EnsurePlaceholders(query)
+		}
+		if _, err := downstream.ExecContext(ctx, query, datasetID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteLocalSyncState(ctx context.Context, local *sql.DB, datasetID, shadowTable string, applyDownstream bool) error {
+	shadows := []string{pushShadowPrefix + shadowTable}
+	if applyDownstream {
+		shadows = append(shadows, applyShadowPrefix+"shadow_vec_docs", applyShadowPrefix+"emb_asset")
+	}
+	for _, shadow := range shadows {
+		if _, err := local.ExecContext(ctx, `DELETE FROM vec_sync_state WHERE dataset_id = ? AND shadow_table = ?`, datasetID, shadow); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func localMaxSCN(ctx context.Context, db *sql.DB, datasetID string) (int64, error) {
+	var maxSCN int64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(scn), 0) FROM _vec_emb_docs WHERE dataset_id = ?`, datasetID).Scan(&maxSCN); err != nil {
+		return 0, err
+	}
+	return maxSCN, nil
+}
+
+func reconcileDownstreamBaseline(ctx context.Context, local *sql.DB, downstream *sql.DB, datasetID, shadowTable string, dialect *info.Dialect, logf func(format string, args ...any)) error {
+	stateShadow := pushShadowPrefix + shadowTable
+	localMax, err := localMaxSCN(ctx, local, datasetID)
+	if err != nil {
+		return err
+	}
+	downMax, ok, err := downstreamMaxSCN(ctx, downstream, datasetID, shadowTable, dialect)
+	if err != nil {
+		if logf != nil {
+			logf("sync root=%s shadow=%s downstream baseline check failed: %v", datasetID, shadowTable, err)
+		}
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	if downMax > localMax {
+		if logf != nil {
+			logf("sync root=%s shadow=%s downstream scn=%d ahead of local max_scn=%d; skipping baseline update", datasetID, shadowTable, downMax, localMax)
+		}
+		return nil
+	}
+	lastSCN, err := localLastSCN(ctx, local, datasetID, stateShadow)
+	if err != nil {
+		return err
+	}
+	if downMax != lastSCN {
+		if err := upsertSyncState(ctx, local, datasetID, stateShadow, downMax); err != nil {
+			return err
+		}
+		if logf != nil {
+			logf("sync root=%s shadow=%s baseline set to downstream scn=%d (local max=%d)", datasetID, shadowTable, downMax, localMax)
+		}
+	}
+	return nil
+}
+
+func downstreamMaxSCN(ctx context.Context, downstream *sql.DB, datasetID, shadowTable string, dialect *info.Dialect) (int64, bool, error) {
+	query := `SELECT COALESCE(MAX(scn), 0) FROM vec_shadow_log WHERE dataset_id = ? AND shadow_table = ?`
+	if dialect != nil {
+		query = dialect.EnsurePlaceholders(query)
+	}
+	var maxSCN int64
+	err := downstream.QueryRowContext(ctx, query, datasetID, shadowTable).Scan(&maxSCN)
+	if err != nil {
+		return 0, false, err
+	}
+	return maxSCN, true, nil
 }
 
 func detectDownstreamDialect(ctx context.Context, db *sql.DB, logf func(format string, args ...any)) (*info.Dialect, bool) {

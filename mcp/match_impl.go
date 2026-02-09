@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -35,6 +36,10 @@ func (h *Handler) match(ctx context.Context, in *MatchInput) (*MatchOutput, erro
 	if strings.TrimSpace(in.Model) != "" {
 		model = in.Model
 	}
+	qvec, _, err := h.queryEmbedding(ctx, in.Query, model)
+	if err != nil {
+		return nil, err
+	}
 	var matcher *matching.Manager
 	if in.Match != nil {
 		opts := in.Match.Options()
@@ -44,14 +49,14 @@ func (h *Handler) match(ctx context.Context, in *MatchInput) (*MatchOutput, erro
 	}
 	results := make([]schema.Document, 0, limit)
 	for _, root := range rootIDs {
-		items, err := h.service.Search(ctx, service.SearchRequest{
+		items, err := h.service.SearchWithEmbedding(ctx, service.SearchRequest{
 			DBPath:   h.dbPath,
 			Dataset:  root,
 			Query:    in.Query,
 			Embedder: h.embedder,
 			Model:    model,
 			Limit:    limit,
-		})
+		}, qvec)
 		if err != nil {
 			return nil, err
 		}
@@ -72,12 +77,14 @@ func (h *Handler) match(ctx context.Context, in *MatchInput) (*MatchOutput, erro
 					}
 				}
 			}
-			meta := map[string]interface{}{
-				"path":   item.Path,
-				"docId":  item.ID,
-				"rootId": root,
-				"score":  item.Score,
+			meta := map[string]interface{}{}
+			if strings.TrimSpace(item.Meta) != "" {
+				_ = json.Unmarshal([]byte(item.Meta), &meta)
 			}
+			meta["path"] = item.Path
+			meta["docId"] = item.ID
+			meta["rootId"] = root
+			meta["score"] = item.Score
 			doc := schema.Document{
 				PageContent: content,
 				Metadata:    meta,

@@ -46,57 +46,43 @@ func (n *noopClientHandler) Elicit(context.Context, *jsonrpc.TypedRequest[*mcpsc
 }
 
 func mcpSearch(ctx context.Context, addr string, input *emcp.SearchInput) (*emcp.SearchOutput, error) {
+	start := time.Now()
 	cli, cleanup, err := newMCPClient(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-
-	params, err := mcpschema.NewCallToolRequestParams("search", input)
-	if err != nil {
-		return nil, err
-	}
-	res, err := cli.CallTool(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-	if err := toolResultError(res); err != nil {
-		return nil, err
-	}
-	var out emcp.SearchOutput
-	if err := decodeToolResult(res, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	out, err := mcpSearchWithClient(ctx, cli, input)
+	log.Printf("mcp metric op=search addr=%s root=%s dur=%s err=%v", addr, input.Root, time.Since(start), err)
+	return out, err
 }
 
 func mcpRoots(ctx context.Context, addr string, input *emcp.RootsInput) (*emcp.RootsOutput, error) {
+	start := time.Now()
 	cli, cleanup, err := newMCPClient(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
-
-	params, err := mcpschema.NewCallToolRequestParams("roots", input)
-	if err != nil {
-		return nil, err
-	}
-	res, err := cli.CallTool(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-	if err := toolResultError(res); err != nil {
-		return nil, err
-	}
-	var out emcp.RootsOutput
-	if err := decodeToolResult(res, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	out, err := mcpRootsWithClient(ctx, cli, input)
+	log.Printf("mcp metric op=roots addr=%s dur=%s err=%v", addr, time.Since(start), err)
+	return out, err
 }
 
 func mcpSearchAll(ctx context.Context, addr, query string, limit int, minScore float64, model string) ([]service.SearchResult, error) {
-	rootsOut, err := mcpRoots(ctx, addr, &emcp.RootsInput{})
+	start := time.Now()
+	cli, cleanup, err := newMCPClient(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	out, err := mcpSearchAllWithClient(ctx, cli, query, limit, minScore, model)
+	log.Printf("mcp metric op=search_all addr=%s dur=%s err=%v", addr, time.Since(start), err)
+	return out, err
+}
+
+func mcpSearchAllWithClient(ctx context.Context, cli *mcpclient.Client, query string, limit int, minScore float64, model string) ([]service.SearchResult, error) {
+	rootsOut, err := mcpRootsWithClient(ctx, cli, &emcp.RootsInput{})
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +107,7 @@ func mcpSearchAll(ctx context.Context, addr, query string, limit int, minScore f
 		wg.Add(1)
 		go func(r string) {
 			defer wg.Done()
-			out, err := mcpSearchWithRetry(ctx, addr, &emcp.SearchInput{
+			out, err := mcpSearchWithRetryClient(ctx, cli, &emcp.SearchInput{
 				Root:     r,
 				Query:    query,
 				Limit:    limit,
@@ -168,10 +154,19 @@ func mcpSearchAll(ctx context.Context, addr, query string, limit int, minScore f
 }
 
 func mcpSearchWithRetry(ctx context.Context, addr string, input *emcp.SearchInput) (*emcp.SearchOutput, error) {
+	cli, cleanup, err := newMCPClient(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	return mcpSearchWithRetryClient(ctx, cli, input)
+}
+
+func mcpSearchWithRetryClient(ctx context.Context, cli *mcpclient.Client, input *emcp.SearchInput) (*emcp.SearchOutput, error) {
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		out, err := mcpSearch(ctx, addr, input)
+		out, err := mcpSearchWithClient(ctx, cli, input)
 		if err == nil {
 			return out, nil
 		}
@@ -211,6 +206,44 @@ func newMCPClient(ctx context.Context, addr string) (*mcpclient.Client, func(), 
 		return nil, nil, err
 	}
 	return cli, func() { cli.Close() }, nil
+}
+
+func mcpSearchWithClient(ctx context.Context, cli *mcpclient.Client, input *emcp.SearchInput) (*emcp.SearchOutput, error) {
+	params, err := mcpschema.NewCallToolRequestParams("search", input)
+	if err != nil {
+		return nil, err
+	}
+	res, err := cli.CallTool(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if err := toolResultError(res); err != nil {
+		return nil, err
+	}
+	var out emcp.SearchOutput
+	if err := decodeToolResult(res, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func mcpRootsWithClient(ctx context.Context, cli *mcpclient.Client, input *emcp.RootsInput) (*emcp.RootsOutput, error) {
+	params, err := mcpschema.NewCallToolRequestParams("roots", input)
+	if err != nil {
+		return nil, err
+	}
+	res, err := cli.CallTool(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if err := toolResultError(res); err != nil {
+		return nil, err
+	}
+	var out emcp.RootsOutput
+	if err := decodeToolResult(res, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func normalizeMCPURL(addr string) string {

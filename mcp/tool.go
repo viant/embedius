@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/viant/jsonrpc"
 	"github.com/viant/mcp-protocol/schema"
@@ -110,6 +112,7 @@ func buildSuccessResult(payload any) (*schema.CallToolResult, *jsonrpc.Error) {
 }
 
 func (h *Handler) search(ctx context.Context, in *SearchInput) (*SearchOutput, error) {
+	start := time.Now()
 	if h == nil || h.service == nil {
 		return nil, fmt.Errorf("mcp: service unavailable")
 	}
@@ -130,7 +133,11 @@ func (h *Handler) search(ctx context.Context, in *SearchInput) (*SearchOutput, e
 	if in.Model != "" {
 		model = in.Model
 	}
-	results, err := h.service.Search(ctx, service.SearchRequest{
+	qvec, cacheHit, err := h.queryEmbedding(ctx, in.Query, model)
+	if err != nil {
+		return nil, err
+	}
+	results, err := h.service.SearchWithEmbedding(ctx, service.SearchRequest{
 		DBPath:   h.dbPath,
 		Dataset:  in.Root,
 		Query:    in.Query,
@@ -138,14 +145,18 @@ func (h *Handler) search(ctx context.Context, in *SearchInput) (*SearchOutput, e
 		Model:    model,
 		Limit:    limit,
 		MinScore: in.MinScore,
-	})
+	}, qvec)
 	if err != nil {
 		return nil, err
+	}
+	if h.metricsLog {
+		log.Printf("mcp metric op=search root=%s matches=%d dur=%s cache_hit=%t", in.Root, len(results), time.Since(start), cacheHit)
 	}
 	return &SearchOutput{Results: results}, nil
 }
 
 func (h *Handler) roots(ctx context.Context, in *RootsInput) (*RootsOutput, error) {
+	start := time.Now()
 	if h == nil || h.service == nil {
 		return nil, fmt.Errorf("mcp: service unavailable")
 	}
@@ -155,6 +166,9 @@ func (h *Handler) roots(ctx context.Context, in *RootsInput) (*RootsOutput, erro
 	infos, err := h.service.Roots(ctx, service.RootsRequest{DBPath: h.dbPath, Root: in.Root})
 	if err != nil {
 		return nil, err
+	}
+	if h.metricsLog {
+		log.Printf("mcp metric op=roots count=%d dur=%s", len(infos), time.Since(start))
 	}
 	return &RootsOutput{Roots: infos}, nil
 }

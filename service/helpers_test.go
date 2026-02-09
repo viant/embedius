@@ -63,3 +63,30 @@ func TestUpsertRootConfig(t *testing.T) {
 		t.Fatalf("unexpected values: include=%q exclude=%q max=%d", gotInclude, gotExclude, gotMax)
 	}
 }
+
+func TestNewMatcher_ConfigGitignoreSemantics(t *testing.T) {
+	spec := RootSpec{
+		Exclude: []string{"/rootbuild", "tmp/"},
+	}
+	m := newMatcher(spec)
+	if !m.IsExcluded("s3://bucket/rootbuild/app.js", 1) {
+		t.Fatalf("expected /rootbuild to exclude root path")
+	}
+	if m.IsExcluded("s3://bucket/dir/rootbuild/app.js", 1) {
+		t.Fatalf("expected /rootbuild to not exclude nested path")
+	}
+	if !m.IsExcluded("s3://bucket/dir/tmp/file.txt", 1) {
+		t.Fatalf("expected tmp/ to exclude nested directory")
+	}
+
+	spec = RootSpec{
+		Include: []string{"/docs/*.md"},
+	}
+	m = newMatcher(spec)
+	if m.IsExcluded("s3://bucket/docs/readme.md", 1) {
+		t.Fatalf("expected /docs/*.md to include root docs")
+	}
+	if !m.IsExcluded("s3://bucket/dir/docs/readme.md", 1) {
+		t.Fatalf("expected /docs/*.md to not include nested docs")
+	}
+}

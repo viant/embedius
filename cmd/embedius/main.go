@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -19,7 +20,9 @@ import (
 	retriever "github.com/viant/embedius"
 	"github.com/viant/embedius/db/sqliteutil"
 	"github.com/viant/embedius/embeddings"
+	"github.com/viant/embedius/embeddings/ollama"
 	"github.com/viant/embedius/embeddings/openai"
+	"github.com/viant/embedius/embeddings/vertexai"
 	"github.com/viant/embedius/mcp"
 	"github.com/viant/embedius/service"
 	"github.com/viant/sqlite-vec/engine"
@@ -99,10 +102,14 @@ func indexCmd(args []string) {
 	maxSize := flags.Int64("max-size", 0, "max file size in bytes")
 	model := flags.String("model", "text-embedding-3-small", "embedding model")
 	openAIKey := flags.String("openai-key", "", "OpenAI API key (optional, defaults to OPENAI_API_KEY)")
-	embedderName := flags.String("embedder", "openai", "embedder: openai|simple")
+	embedderName := flags.String("embedder", "openai", "embedder: openai|simple|ollama|vertexai")
 	chunkSize := flags.Int("chunk-size", 4096, "default chunk size in bytes")
 	batchSize := flags.Int("batch", 64, "embedding batch size")
 	prune := flags.Bool("prune", false, "hard-delete archived rows after indexing")
+	vertexProject := flags.String("vertex-project", "", "vertexai project id (or VERTEXAI_PROJECT_ID)")
+	vertexLocation := flags.String("vertex-location", "", "vertexai location (or VERTEXAI_LOCATION)")
+	vertexScopes := flags.String("vertex-scopes", "", "vertexai OAuth scopes csv (or VERTEXAI_SCOPES)")
+	ollamaBaseURL := flags.String("ollama-base-url", "", "ollama base URL (or OLLAMA_BASE_URL)")
 	upstreamDriver := flags.String("upstream-driver", "", "upstream sql driver (optional, auto-detect if empty)")
 	upstreamDSN := flags.String("upstream-dsn", "", "upstream dsn (optional)")
 	upstreamShadow := flags.String("upstream-shadow", "shadow_vec_docs", "upstream shadow table name")
@@ -131,7 +138,15 @@ func indexCmd(args []string) {
 	}
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, roots[0].Path)
 
-	emb := selectEmbedder(*embedderName, *openAIKey, *model)
+	emb, err := selectEmbedder(*embedderName, *openAIKey, *model, embedderOptions{
+		vertexProject:  *vertexProject,
+		vertexLocation: *vertexLocation,
+		vertexScopes:   parseCSV(*vertexScopes),
+		ollamaBaseURL:  *ollamaBaseURL,
+	})
+	if err != nil {
+		log.Fatalf("embedder: %v", err)
+	}
 	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithEmbedder(emb))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
@@ -181,6 +196,7 @@ func syncCmd(args []string) {
 	downstreamDriver := flags.String("downstream-driver", "", "downstream sql driver (auto-detect if empty)")
 	downstreamDSN := flags.String("downstream-dsn", "", "downstream dsn (optional)")
 	downstreamApply := flags.Bool("downstream-apply", false, "apply downstream materialized tables (bigquery only)")
+	downstreamReset := flags.Bool("downstream-reset", false, "reset downstream log/state before push (dangerous)")
 	upstreamShadow := flags.String("upstream-shadow", "shadow_vec_docs", "upstream shadow table name")
 	syncBatch := flags.Int("sync-batch", 200, "upstream sync batch size")
 	invalidate := flags.Bool("invalidate", false, "invalidate vec cache after sync")
@@ -244,6 +260,7 @@ func syncCmd(args []string) {
 			DownstreamShadow: *upstreamShadow,
 			SyncBatch:        *syncBatch,
 			ApplyDownstream:  *downstreamApply,
+			DownstreamReset:  *downstreamReset,
 			Logf:             logf,
 		}); err != nil {
 			log.Fatalf("sync: %v", err)
@@ -403,9 +420,14 @@ func searchCmd(args []string) {
 	prompt := flags.String("prompt", "", "alias for --query")
 	model := flags.String("model", "text-embedding-3-small", "embedding model")
 	openAIKey := flags.String("openai-key", "", "OpenAI API key (optional, defaults to OPENAI_API_KEY)")
-	embedderName := flags.String("embedder", "openai", "embedder: openai|simple")
+	embedderName := flags.String("embedder", "openai", "embedder: openai|simple|ollama|vertexai")
 	limit := flags.Int("limit", 10, "max results")
 	minScore := flags.Float64("min-score", 0, "minimum match_score")
+	showMeta := flags.Bool("show-meta", false, "print document meta JSON")
+	vertexProject := flags.String("vertex-project", "", "vertexai project id (or VERTEXAI_PROJECT_ID)")
+	vertexLocation := flags.String("vertex-location", "", "vertexai location (or VERTEXAI_LOCATION)")
+	vertexScopes := flags.String("vertex-scopes", "", "vertexai OAuth scopes csv (or VERTEXAI_SCOPES)")
+	ollamaBaseURL := flags.String("ollama-base-url", "", "ollama base URL (or OLLAMA_BASE_URL)")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
 
@@ -456,7 +478,7 @@ func searchCmd(args []string) {
 			if err != nil {
 				log.Fatalf("search: %v", err)
 			}
-			printSearchResults(merged)
+			printSearchResults(merged, *showMeta)
 			return
 		}
 		rootName := *root
@@ -473,7 +495,7 @@ func searchCmd(args []string) {
 		if err != nil {
 			log.Fatalf("search: %v", err)
 		}
-		printSearchResults(out.Results)
+		printSearchResults(out.Results, *showMeta)
 		return
 	}
 
@@ -483,7 +505,15 @@ func searchCmd(args []string) {
 		os.Exit(2)
 	}
 
-	emb := selectEmbedder(*embedderName, *openAIKey, *model)
+	emb, err := selectEmbedder(*embedderName, *openAIKey, *model, embedderOptions{
+		vertexProject:  *vertexProject,
+		vertexLocation: *vertexLocation,
+		vertexScopes:   parseCSV(*vertexScopes),
+		ollamaBaseURL:  *ollamaBaseURL,
+	})
+	if err != nil {
+		log.Fatalf("embedder: %v", err)
+	}
 	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithEmbedder(emb))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
@@ -600,16 +630,35 @@ func searchCmd(args []string) {
 	if err != nil {
 		log.Fatalf("search: %v", err)
 	}
-	printSearchResults(results)
+	printSearchResults(results, *showMeta)
 }
 
-func printSearchResults(results []service.SearchResult) {
+func printSearchResults(results []service.SearchResult, showMeta bool) {
 	for _, item := range results {
 		out := item.Content
 		if len(out) > 200 {
 			out = out[:200] + "..."
 		}
-		fmt.Printf("id=%s score=%.4f distance=%.4f path=%s\n%s\n\n", item.ID, item.Score, 1-item.Score, item.Path, out)
+		metaStr := ""
+		rangeStr := ""
+		if strings.TrimSpace(item.Meta) != "" {
+			var meta map[string]interface{}
+			if err := json.Unmarshal([]byte(item.Meta), &meta); err == nil {
+				if b, err := json.Marshal(meta); err == nil {
+					metaStr = "meta=" + string(b)
+				}
+				if start, okStart := meta["start"]; okStart {
+					if end, okEnd := meta["end"]; okEnd {
+						rangeStr = fmt.Sprintf(" range=%v..%v", start, end)
+					}
+				}
+			}
+		}
+		if showMeta && metaStr != "" {
+			fmt.Printf("id=%s score=%.4f distance=%.4f path=%s\n%s\n%s\n\n", item.ID, item.Score, 1-item.Score, item.Path, metaStr, out)
+		} else {
+			fmt.Printf("id=%s score=%.4f distance=%.4f path=%s%s\n%s\n\n", item.ID, item.Score, 1-item.Score, item.Path, rangeStr, out)
+		}
 	}
 }
 
@@ -820,12 +869,32 @@ func checkVecModule(ctx context.Context, conn *sql.Conn) (bool, error) {
 	return true, nil
 }
 
-func selectEmbedder(name, apiKey, model string) embeddings.Embedder {
+type embedderOptions struct {
+	vertexProject  string
+	vertexLocation string
+	vertexScopes   []string
+	ollamaBaseURL  string
+}
+
+func selectEmbedder(name, apiKey, model string, opts embedderOptions) (embeddings.Embedder, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "simple":
-		return service.NewSimpleEmbedder(64)
+		return service.NewSimpleEmbedder(64), nil
+	case "ollama":
+		return ollamaEmbedder(model, resolveEnv(opts.ollamaBaseURL, "OLLAMA_BASE_URL")), nil
+	case "vertexai":
+		project := resolveEnv(opts.vertexProject, "VERTEXAI_PROJECT_ID")
+		location := resolveEnv(opts.vertexLocation, "VERTEXAI_LOCATION")
+		scopes := opts.vertexScopes
+		if len(scopes) == 0 {
+			scopes = parseCSV(os.Getenv("VERTEXAI_SCOPES"))
+		}
+		if project == "" {
+			return nil, fmt.Errorf("vertexai project id is required (use --vertex-project or VERTEXAI_PROJECT_ID)")
+		}
+		return vertexaiEmbedder(project, model, location, scopes), nil
 	default:
-		return openaiEmbedder(apiKey, model)
+		return openaiEmbedder(apiKey, model), nil
 	}
 }
 
@@ -835,6 +904,38 @@ func openaiEmbedder(apiKey, model string) embeddings.Embedder {
 	}
 	client := openai.NewClient(apiKey, model)
 	return &openai.Embedder{C: client}
+}
+
+func ollamaEmbedder(model, baseURL string) embeddings.Embedder {
+	client := ollama.NewClient(model, baseURL)
+	return &ollama.Embedder{C: client}
+}
+
+func vertexaiEmbedder(projectID, model, location string, scopes []string) embeddings.Embedder {
+	return vertexai.NewEmbedder(projectID, model, location, scopes)
+}
+
+func parseCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func resolveEnv(val, env string) string {
+	if strings.TrimSpace(val) != "" {
+		return val
+	}
+	return strings.TrimSpace(os.Getenv(env))
 }
 
 func progressPrinter(enabled bool) func(root string, current, total int, path string, tokens int) {

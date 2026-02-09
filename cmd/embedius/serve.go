@@ -27,7 +27,12 @@ func serveCmd(args []string) {
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (default from config or 127.0.0.1:6061)")
 	model := flags.String("model", "text-embedding-3-small", "embedding model")
 	openAIKey := flags.String("openai-key", "", "OpenAI API key (optional, defaults to OPENAI_API_KEY)")
-	embedderName := flags.String("embedder", "openai", "embedder: openai|simple")
+	embedderName := flags.String("embedder", "openai", "embedder: openai|simple|ollama|vertexai")
+	vertexProject := flags.String("vertex-project", "", "vertexai project id (or VERTEXAI_PROJECT_ID)")
+	vertexLocation := flags.String("vertex-location", "", "vertexai location (or VERTEXAI_LOCATION)")
+	vertexScopes := flags.String("vertex-scopes", "", "vertexai OAuth scopes csv (or VERTEXAI_SCOPES)")
+	ollamaBaseURL := flags.String("ollama-base-url", "", "ollama base URL (or OLLAMA_BASE_URL)")
+	metricsLog := flags.Bool("metrics-log", false, "log mcp metric lines")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
 
@@ -60,7 +65,15 @@ func serveCmd(args []string) {
 		log.Fatalf("serve: mcp address is required")
 	}
 
-	emb := selectEmbedder(*embedderName, *openAIKey, *model)
+	emb, err := selectEmbedder(*embedderName, *openAIKey, *model, embedderOptions{
+		vertexProject:  *vertexProject,
+		vertexLocation: *vertexLocation,
+		vertexScopes:   parseCSV(*vertexScopes),
+		ollamaBaseURL:  *ollamaBaseURL,
+	})
+	if err != nil {
+		log.Fatalf("embedder: %v", err)
+	}
 	db, err := openVecDB(ctx, dbPathVal)
 	if err != nil {
 		log.Fatalf("serve: open db: %v", err)
@@ -77,7 +90,7 @@ func serveCmd(args []string) {
 
 	server, err := mcpsrv.New(
 		mcpsrv.WithImplementation(schema.Implementation{Name: "embedius-mcp", Version: "0.1.0"}),
-		mcpsrv.WithNewHandler(emcp.NewHandler(svc, dbPathVal, emb, *model, rootSpecs)),
+		mcpsrv.WithNewHandler(emcp.NewHandler(svc, dbPathVal, emb, *model, rootSpecs, *metricsLog)),
 		mcpsrv.WithEndpointAddress(addr),
 		mcpsrv.WithRootRedirect(true),
 		mcpsrv.WithStreamableURI("/mcp"),

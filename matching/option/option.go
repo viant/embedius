@@ -137,7 +137,11 @@ func parseGitignore(reader io.Reader) []string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		patterns = append(patterns, line)
+		if strings.HasPrefix(line, "!") {
+			patterns = append(patterns, "!git:"+strings.TrimPrefix(line, "!"))
+			continue
+		}
+		patterns = append(patterns, "git:"+line)
 	}
 
 	return patterns

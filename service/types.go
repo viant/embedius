@@ -69,6 +69,7 @@ type PushRequest struct {
 	DownstreamShadow string
 	SyncBatch        int
 	ApplyDownstream  bool
+	DownstreamReset  bool
 	Logf             func(format string, args ...any)
 }
 

@@ -14,15 +14,17 @@ import (
 
 type Handler struct {
 	*protoserver.DefaultHandler
-	service   *service.Service
-	dbPath    string
-	embedder  embeddings.Embedder
-	model     string
-	ops       protoclient.Operations
-	rootSpecs map[string]service.RootSpec
+	service    *service.Service
+	dbPath     string
+	embedder   embeddings.Embedder
+	model      string
+	ops        protoclient.Operations
+	rootSpecs  map[string]service.RootSpec
+	embedCache *embedCache
+	metricsLog bool
 }
 
-func NewHandler(svc *service.Service, dbPath string, embedder embeddings.Embedder, model string, roots map[string]service.RootSpec) protoserver.NewHandler {
+func NewHandler(svc *service.Service, dbPath string, embedder embeddings.Embedder, model string, roots map[string]service.RootSpec, metricsLog bool) protoserver.NewHandler {
 	return func(_ context.Context, notifier transport.Notifier, logger logger.Logger, clientOperation protoclient.Operations) (protoserver.Handler, error) {
 		base := protoserver.NewDefaultHandler(notifier, logger, clientOperation)
 		h := &Handler{
@@ -33,6 +35,8 @@ func NewHandler(svc *service.Service, dbPath string, embedder embeddings.Embedde
 			model:          model,
 			ops:            clientOperation,
 			rootSpecs:      roots,
+			embedCache:     newEmbedCache(1000),
+			metricsLog:     metricsLog,
 		}
 		if err := registerTools(base.Registry, h); err != nil {
 			return nil, err
