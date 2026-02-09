@@ -315,24 +315,35 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 	if relPath != "" {
 		assetID = relPath
 	}
+	content := data
+	var fragments []*document.Fragment
+	metaMap := map[string]interface{}{
+		meta.DocumentID: docId,
+		"path":          docId,
+		"rel_path":      relPath,
+		"asset_id":      assetID,
+		"md5":           md5hex,
+	}
+	if cs, ok := aSplitter.(splitter.ContentSplitter); ok {
+		fragments, content = cs.SplitWithContent(data, metaMap)
+	} else {
+		fragments = aSplitter.Split(data, metaMap)
+	}
+	if content == nil {
+		content = data
+	}
 	entry := &document.Entry{
-		ID:      docId,
-		ModTime: object.ModTime(),
-		Hash:    dataHash,
-		Fragments: aSplitter.Split(data, map[string]interface{}{
-			meta.DocumentID: docId,
-			"path":          docId,
-			"rel_path":      relPath,
-			"asset_id":      assetID,
-			"md5":           md5hex,
-		}),
+		ID:        docId,
+		ModTime:   object.ModTime(),
+		Hash:      dataHash,
+		Fragments: fragments,
 	}
 	cache.Set(docId, entry)
 
 	// Create documents from fragments
 	var documents []schema.Document
 	for _, fragment := range entry.Fragments {
-		documents = append(documents, fragment.NewDocument(docId, data))
+		documents = append(documents, fragment.NewDocument(docId, content))
 	}
 
 	// Determine IDs to remove (from previous version)

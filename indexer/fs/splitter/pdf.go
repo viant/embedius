@@ -26,8 +26,13 @@ func NewPDFSplitter(maxChunk int) Splitter {
 }
 
 func (p *pdfSplitter) Split(data []byte, metadata map[string]interface{}) []*document.Fragment {
+	frags, _ := p.SplitWithContent(data, metadata)
+	return frags
+}
+
+func (p *pdfSplitter) SplitWithContent(data []byte, metadata map[string]interface{}) ([]*document.Fragment, []byte) {
 	text := extractPDFText(data)
-	return p.delegate.Split(text, metadata)
+	return p.delegate.Split(text, metadata), text
 }
 
 func extractPDFText(data []byte) []byte {

@@ -52,6 +52,11 @@ func NewFactory(defaultMaxSize int) *Factory {
 	factory.RegisterExtensionSplitter(".md", NewMarkdownSplitter(defaultMaxSize))
 	factory.RegisterExtensionSplitter(".pdf", NewPDFSplitter(defaultMaxSize))
 	factory.RegisterExtensionSplitter(".docx", NewDOCXSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".xlsx", NewExcelSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".xlsm", NewExcelSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".xltx", NewExcelSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".xltm", NewExcelSplitter(defaultMaxSize))
+	factory.RegisterExtensionSplitter(".xls", NewXLSSplitter(defaultMaxSize))
 	return factory
 }
 

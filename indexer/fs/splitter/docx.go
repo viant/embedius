@@ -25,11 +25,16 @@ func NewDOCXSplitter(maxChunk int) Splitter {
 }
 
 func (d *docxSplitter) Split(data []byte, metadata map[string]interface{}) []*document.Fragment {
+	frags, _ := d.SplitWithContent(data, metadata)
+	return frags
+}
+
+func (d *docxSplitter) SplitWithContent(data []byte, metadata map[string]interface{}) ([]*document.Fragment, []byte) {
 	text := extractDOCXText(data)
 	if len(text) == 0 {
 		text = extractPrintableText(data)
 	}
-	return d.delegate.Split(text, metadata)
+	return d.delegate.Split(text, metadata), text
 }
 
 func extractDOCXText(data []byte) []byte {

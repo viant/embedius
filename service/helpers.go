@@ -221,13 +221,25 @@ func toInt64(v interface{}) int64 {
 
 func splitFile(relPath string, data []byte, factory *splitter.Factory) ([]schema.Document, error) {
 	s := factory.GetSplitter(relPath, len(data))
-	fragments := s.Split(data, map[string]interface{}{
-		meta.DocumentID: relPath,
-		meta.PathKey:    relPath,
-	})
+	content := data
+	var fragments []*document.Fragment
+	if cs, ok := s.(splitter.ContentSplitter); ok {
+		fragments, content = cs.SplitWithContent(data, map[string]interface{}{
+			meta.DocumentID: relPath,
+			meta.PathKey:    relPath,
+		})
+	} else {
+		fragments = s.Split(data, map[string]interface{}{
+			meta.DocumentID: relPath,
+			meta.PathKey:    relPath,
+		})
+	}
+	if content == nil {
+		content = data
+	}
 	docs := make([]schema.Document, 0, len(fragments))
 	for _, frag := range fragments {
-		docs = append(docs, frag.NewDocument(relPath, data))
+		docs = append(docs, frag.NewDocument(relPath, content))
 	}
 	return docs, nil
 }

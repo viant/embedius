@@ -6,6 +6,7 @@ require (
 	github.com/google/gops v0.3.28
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/minio/highwayhash v1.0.3
+	github.com/shakinm/xlsReader v0.9.12
 	github.com/viant/afs v1.30.0
 	github.com/viant/bigquery v0.5.1
 	github.com/viant/bintly v0.2.0
@@ -13,6 +14,7 @@ require (
 	github.com/viant/mcp v0.10.0
 	github.com/viant/mcp-protocol v0.10.0
 	github.com/viant/sqlx v0.22.0
+	github.com/xuri/excelize/v2 v2.10.0
 	golang.org/x/sys v0.37.0
 	modernc.org/sqlite v1.45.0
 )
@@ -42,14 +44,20 @@ require (
 	github.com/lestrrat-go/iter v1.0.2 // indirect
 	github.com/lestrrat-go/jwx v1.2.29 // indirect
 	github.com/lestrrat-go/option v1.0.1 // indirect
+	github.com/metakeule/fmtdate v1.1.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nxadm/tail v1.4.11 // indirect
 	github.com/onsi/gomega v1.39.0 // indirect
+	github.com/richardlehane/mscfb v1.0.4 // indirect
+	github.com/richardlehane/msoleps v1.0.4 // indirect
+	github.com/tiendc/go-deepcopy v1.7.1 // indirect
 	github.com/viant/gosh v0.2.4 // indirect
 	github.com/viant/parsly v0.3.3 // indirect
 	github.com/viant/scy v0.25.3 // indirect
 	github.com/viant/structology v0.8.0 // indirect
 	github.com/viant/tagly v0.3.0 // indirect
+	github.com/xuri/efp v0.0.1 // indirect
+	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
