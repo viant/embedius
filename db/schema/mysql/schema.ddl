@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS vec_shadow_log (
   PRIMARY KEY(dataset_id, shadow_table, scn)
 );
 
+CREATE TABLE IF NOT EXISTS vec_sync_state (
+  dataset_id   VARCHAR(255) NOT NULL,
+  shadow_table VARCHAR(255) NOT NULL,
+  last_scn     BIGINT NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY(dataset_id, shadow_table)
+);
+
 CREATE TABLE IF NOT EXISTS shadow_vec_docs (
   dataset_id       VARCHAR(255) NOT NULL,
   id               VARCHAR(512) NOT NULL,

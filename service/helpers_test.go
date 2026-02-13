@@ -45,12 +45,12 @@ func TestUpsertRootConfig(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
-	if err := ensureSchema(context.Background(), db); err != nil {
+	if err := ensureSchema(context.Background(), db, "sqlite"); err != nil {
 		t.Fatalf("ensureSchema: %v", err)
 	}
 	include := encodeGlobList([]string{"**/*.go", "**/*.sql"})
 	exclude := encodeGlobList([]string{"**/*_test.go"})
-	if err := upsertRootConfig(context.Background(), db, "mediator", include, exclude, 1024); err != nil {
+	if err := upsertRootConfig(context.Background(), db, "mediator", include, exclude, 1024, "sqlite"); err != nil {
 		t.Fatalf("upsertRootConfig: %v", err)
 	}
 	row := db.QueryRow(`SELECT include_globs, exclude_globs, max_size_bytes FROM emb_root_config WHERE dataset_id = ?`, "mediator")

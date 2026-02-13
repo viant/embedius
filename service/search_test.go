@@ -25,7 +25,7 @@ func TestSearchFallback(t *testing.T) {
 		t.Fatalf("conn: %v", err)
 	}
 
-	if err := ensureSchema(ctx, conn); err != nil {
+	if err := ensureSchema(ctx, conn, "sqlite"); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
 

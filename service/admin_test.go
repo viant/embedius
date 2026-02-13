@@ -20,7 +20,7 @@ func TestAdminCheckAndPrune(t *testing.T) {
 		t.Fatalf("conn: %v", err)
 	}
 	defer conn.Close()
-	if err := ensureSchema(ctx, conn); err != nil {
+	if err := ensureSchema(ctx, conn, "sqlite"); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
 

@@ -24,13 +24,18 @@ func (s *Service) Admin(ctx context.Context, req AdminRequest) ([]AdminResult, e
 	if err != nil {
 		return nil, err
 	}
-	conn, err := ensureSchemaConn(ctx, db)
+	conn, err := ensureSchemaConn(ctx, db, s.driver)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `CREATE VIRTUAL TABLE IF NOT EXISTS vec_admin USING vec_admin(op)`); err != nil {
-		return nil, err
+	if s.driver != "sqlite" && (req.Action == "rebuild" || req.Action == "invalidate") {
+		return nil, fmt.Errorf("admin: action %q requires sqlite store", req.Action)
+	}
+	if s.driver == "sqlite" {
+		if _, err := conn.ExecContext(ctx, `CREATE VIRTUAL TABLE IF NOT EXISTS vec_admin USING vec_admin(op)`); err != nil {
+			return nil, err
+		}
 	}
 
 	var results []AdminResult
@@ -75,12 +80,12 @@ func (s *Service) Admin(ctx context.Context, req AdminRequest) ([]AdminResult, e
 			} else if !req.Force {
 				return nil, fmt.Errorf("prune %s: --scn requires --force", spec.Name)
 			}
-			if err := pruneArchivedBefore(ctx, conn, spec.Name, targetSCN); err != nil {
+			if err := pruneArchivedBefore(ctx, conn, spec.Name, targetSCN, s.driver); err != nil {
 				return nil, err
 			}
 			results = append(results, AdminResult{Root: spec.Name, Action: req.Action, Details: fmt.Sprintf("up_to_scn=%d", targetSCN)})
 		case "check":
-			stats, err := checkIntegrity(ctx, conn, spec.Name)
+			stats, err := checkIntegrity(ctx, conn, spec.Name, s.driver)
 			if err != nil {
 				return nil, err
 			}

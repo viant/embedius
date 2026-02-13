@@ -91,12 +91,14 @@ func buildVersion() string {
 
 func indexCmd(args []string) {
 	flags := flag.NewFlagSet("index", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required)")
+	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
+	storeDSN := flags.String("store-dsn", "", "store dsn for indexing (optional, sqlite only)")
+	storeDriver := flags.String("store-driver", "", "store driver (optional, auto-detect if empty)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
 	rootPath := flags.String("path", "", "filesystem path to index (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
-	allRoots := flags.Bool("all", false, "index all roots in config (requires --config)")
+	allRoots := flags.Bool("all", false, "index all roots in config (uses --config or ~/embedius/config.yaml)")
 	include := flags.String("include", "", "comma-separated include patterns")
 	exclude := flags.String("exclude", "", "comma-separated exclude patterns")
 	maxSize := flags.Int64("max-size", 0, "max file size in bytes")
@@ -136,7 +138,36 @@ func indexCmd(args []string) {
 	if err != nil {
 		log.Fatalf("resolve roots: %v", err)
 	}
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, roots[0].Path)
+	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	storeDSNVal := strings.TrimSpace(*storeDSN)
+	if storeDSNVal == "" {
+		storeDSNVal = cfgStore.DSN
+	}
+	storeDriverVal := strings.TrimSpace(*storeDriver)
+	if storeDriverVal == "" {
+		storeDriverVal = cfgStore.Driver
+	}
+	if storeDSNVal != "" {
+		if storeDriverVal == "" {
+			if detected, ok := detectUpstreamDriver(storeDSNVal); ok {
+				storeDriverVal = detected
+			} else {
+				log.Fatalf("index: unable to detect store driver from dsn")
+			}
+		}
+	}
+	if storeDSNVal != "" {
+		dbPathVal = storeDSNVal
+	}
+	if dbPathVal == "" {
+		dbPathVal = defaultDBPath(configPathVal)
+	}
+	if storeDriverVal == "" {
+		if detected, ok := detectUpstreamDriver(dbPathVal); ok {
+			storeDriverVal = detected
+		}
+	}
 
 	emb, err := selectEmbedder(*embedderName, *openAIKey, *model, embedderOptions{
 		vertexProject:  *vertexProject,
@@ -147,7 +178,7 @@ func indexCmd(args []string) {
 	if err != nil {
 		log.Fatalf("embedder: %v", err)
 	}
-	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithEmbedder(emb))
+	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithDriver(storeDriverVal), service.WithEmbedder(emb))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
 	}
@@ -183,11 +214,11 @@ func indexCmd(args []string) {
 
 func syncCmd(args []string) {
 	flags := flag.NewFlagSet("sync", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required)")
+	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
-	allRoots := flags.Bool("all", false, "sync all roots in config (requires --config)")
+	allRoots := flags.Bool("all", false, "sync all roots in config (uses --config or ~/embedius/config.yaml)")
 	include := flags.String("include", "", "comma-separated include patterns")
 	exclude := flags.String("exclude", "", "comma-separated exclude patterns")
 	maxSize := flags.Int64("max-size", 0, "max file size in bytes")
@@ -231,12 +262,25 @@ func syncCmd(args []string) {
 		log.Fatalf("resolve roots: %v", err)
 	}
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	if dbPathVal == "" && cfgStore.DSN != "" {
+		dbPathVal = cfgStore.DSN
+	}
+	if dbPathVal == "" {
+		dbPathVal = defaultDBPath(configPathVal)
+	}
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)
 	}
+	storeDriverVal := cfgStore.Driver
+	if storeDriverVal == "" {
+		if detected, ok := detectUpstreamDriver(dbPathVal); ok {
+			storeDriverVal = detected
+		}
+	}
 
-	svc, err := service.NewService(service.WithDSN(dbPathVal))
+	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithDriver(storeDriverVal))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
 	}
@@ -267,6 +311,7 @@ func syncCmd(args []string) {
 		}
 		return
 	}
+	ensureSQLiteStore("sync", dbPathVal)
 
 	upstreamDriverVal := *upstreamDriver
 	if upstreamDriverVal == "" {
@@ -335,11 +380,11 @@ func syncProgressPrinter(enabled bool) func(format string, args ...any) {
 
 func adminCmd(args []string) {
 	flags := flag.NewFlagSet("admin", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required)")
+	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
-	allRoots := flags.Bool("all", false, "apply to all roots in config (requires --config)")
+	allRoots := flags.Bool("all", false, "apply to all roots in config (uses --config or ~/embedius/config.yaml)")
 	action := flags.String("action", "rebuild", "action: rebuild|invalidate|prune|check")
 	shadow := flags.String("shadow", "main._vec_emb_docs", "shadow table (qualified, for rebuild/invalidate)")
 	syncShadow := flags.String("sync-shadow", "shadow_vec_docs", "sync shadow name in vec_sync_state (for prune)")
@@ -347,11 +392,6 @@ func adminCmd(args []string) {
 	force := flags.Bool("force", false, "allow prune without sync state (use with --scn)")
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
-
-	if *dbPath == "" {
-		flags.Usage()
-		os.Exit(2)
-	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -368,12 +408,25 @@ func adminCmd(args []string) {
 		log.Fatalf("resolve roots: %v", err)
 	}
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	if dbPathVal == "" && cfgStore.DSN != "" {
+		dbPathVal = cfgStore.DSN
+	}
+	if dbPathVal == "" {
+		dbPathVal = defaultDBPath(configPathVal)
+	}
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)
 	}
+	storeDriverVal := cfgStore.Driver
+	if storeDriverVal == "" {
+		if detected, ok := detectUpstreamDriver(dbPathVal); ok {
+			storeDriverVal = detected
+		}
+	}
 
-	svc, err := service.NewService(service.WithDSN(dbPathVal))
+	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithDriver(storeDriverVal))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
 	}
@@ -409,12 +462,12 @@ func adminCmd(args []string) {
 
 func searchCmd(args []string) {
 	flags := flag.NewFlagSet("search", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required)")
+	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote search")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (required unless --all)")
-	allRoots := flags.Bool("all", false, "search all roots in config (requires --config)")
+	allRoots := flags.Bool("all", false, "search all roots in config (uses --config or ~/embedius/config.yaml)")
 	allWorkers := flags.Int("all-workers", 5, "max concurrent root searches with --all")
 	query := flags.String("query", "", "query text (required)")
 	prompt := flags.String("prompt", "", "alias for --query")
@@ -500,10 +553,24 @@ func searchCmd(args []string) {
 	}
 
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	if dbPathVal == "" && cfgStore.DSN != "" {
+		dbPathVal = cfgStore.DSN
+	}
+	if dbPathVal == "" {
+		dbPathVal = defaultDBPath(configPathVal)
+	}
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)
 	}
+	storeDriverVal := cfgStore.Driver
+	if storeDriverVal == "" {
+		if detected, ok := detectUpstreamDriver(dbPathVal); ok {
+			storeDriverVal = detected
+		}
+	}
+	ensureSQLiteStore("search", dbPathVal)
 
 	emb, err := selectEmbedder(*embedderName, *openAIKey, *model, embedderOptions{
 		vertexProject:  *vertexProject,
@@ -514,7 +581,7 @@ func searchCmd(args []string) {
 	if err != nil {
 		log.Fatalf("embedder: %v", err)
 	}
-	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithEmbedder(emb))
+	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithDriver(storeDriverVal), service.WithEmbedder(emb))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
 	}
@@ -664,7 +731,7 @@ func printSearchResults(results []service.SearchResult, showMeta bool) {
 
 func rootsCmd(args []string) {
 	flags := flag.NewFlagSet("roots", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required)")
+	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote roots")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
@@ -730,12 +797,25 @@ func rootsCmd(args []string) {
 	}
 
 	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	if dbPathVal == "" && cfgStore.DSN != "" {
+		dbPathVal = cfgStore.DSN
+	}
+	if dbPathVal == "" {
+		dbPathVal = defaultDBPath(configPathVal)
+	}
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)
 	}
+	storeDriverVal := cfgStore.Driver
+	if storeDriverVal == "" {
+		if detected, ok := detectUpstreamDriver(dbPathVal); ok {
+			storeDriverVal = detected
+		}
+	}
 
-	svc, err := service.NewService(service.WithDSN(dbPathVal))
+	svc, err := service.NewService(service.WithDSN(dbPathVal), service.WithDriver(storeDriverVal))
 	if err != nil {
 		log.Fatalf("service init: %v", err)
 	}
@@ -805,6 +885,46 @@ func resolveConfigPath(flagValue string) string {
 		return path
 	}
 	return ""
+}
+
+func defaultDBPath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(configPath)
+	if dir == "" || dir == "." {
+		return ""
+	}
+	return filepath.Join(dir, "embedius.sqlite")
+}
+
+func ensureSQLiteStore(cmd, dsn string) {
+	if driver, ok := detectUpstreamDriver(dsn); ok && driver != "sqlite" {
+		log.Fatalf("%s: unsupported store driver %q (sqlite only)", cmd, driver)
+	}
+}
+
+type storeConfig struct {
+	DSN    string
+	Driver string
+}
+
+func resolveStoreConfig(configPath string) storeConfig {
+	if configPath == "" {
+		return storeConfig{}
+	}
+	cfg, err := service.LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	dsn := strings.TrimSpace(cfg.Store.DSN)
+	driver := strings.TrimSpace(cfg.Store.Driver)
+	if driver == "" && dsn != "" {
+		if detected, ok := detectUpstreamDriver(dsn); ok {
+			driver = detected
+		}
+	}
+	return storeConfig{DSN: dsn, Driver: driver}
 }
 
 func openVecDB(ctx context.Context, dsn string) (*sql.DB, error) {

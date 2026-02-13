@@ -37,7 +37,8 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 	if err != nil {
 		return err
 	}
-	conn, err := ensureSchemaConn(ctx, db)
+	driver := s.driver
+	conn, err := ensureSchemaConn(ctx, db, driver)
 	if err != nil {
 		return err
 	}
@@ -60,18 +61,21 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 		if err != nil {
 			return fmt.Errorf("resolve root path: %w", err)
 		}
-		if err := ensureDataset(ctx, conn, spec.Name, absRoot); err != nil {
+		if err := ensureDataset(ctx, conn, spec.Name, absRoot, driver); err != nil {
 			return err
 		}
-		if err := upsertRootConfig(ctx, conn, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+		if err := upsertRootConfig(ctx, conn, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes, driver); err != nil {
 			return err
 		}
 		if req.Logf != nil {
-			if info, err := rootSummary(ctx, conn, spec.Name); err == nil {
+			if info, err := rootSummary(ctx, conn, spec.Name, driver); err == nil {
 				logRootSummary(req.Logf, "index start", info)
 			}
 		}
 		if up != nil {
+			if driver != "sqlite" {
+				return fmt.Errorf("index: upstream sync requires sqlite store")
+			}
 			if err := sqlitevec.SyncUpstream(ctx, db, up, sqlitevec.SyncConfig{
 				DatasetID:      spec.Name,
 				UpstreamShadow: req.UpstreamShadow,
@@ -113,11 +117,11 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 			if req.Logf != nil {
 				req.Logf("index file root=%s path=%s size=%d md5=%s", spec.Name, f.rel, f.size, f.md5)
 			}
-			scn, err := nextSCN(ctx, conn, spec.Name)
+			scn, err := nextSCN(ctx, conn, spec.Name, driver)
 			if err != nil {
 				return err
 			}
-			if err := upsertAsset(ctx, conn, spec.Name, f, scn); err != nil {
+			if err := upsertAsset(ctx, conn, spec.Name, f, scn, driver); err != nil {
 				return err
 			}
 
@@ -125,7 +129,7 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 			if err != nil {
 				return err
 			}
-			tokens, err := upsertDocuments(ctx, conn, spec.Name, f.assetID, docs, emb, req.BatchSize, scn, f.md5, f.rel, req.Model)
+			tokens, err := upsertDocuments(ctx, conn, spec.Name, f.assetID, docs, emb, req.BatchSize, scn, f.md5, f.rel, req.Model, driver)
 			if err != nil {
 				return err
 			}
@@ -136,22 +140,22 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 			if seen[assetID] || info.archived {
 				continue
 			}
-			scn, err := nextSCN(ctx, conn, spec.Name)
+			scn, err := nextSCN(ctx, conn, spec.Name, driver)
 			if err != nil {
 				return err
 			}
-			if err := archiveAsset(ctx, conn, spec.Name, assetID, scn); err != nil {
+			if err := archiveAsset(ctx, conn, spec.Name, assetID, scn, driver); err != nil {
 				return err
 			}
 		}
 
 		if req.Prune {
-			if err := pruneArchived(ctx, conn, spec.Name); err != nil {
+			if err := pruneArchived(ctx, conn, spec.Name, driver); err != nil {
 				return err
 			}
 		}
 		if req.Logf != nil {
-			if info, err := rootSummary(ctx, conn, spec.Name); err == nil {
+			if info, err := rootSummary(ctx, conn, spec.Name, driver); err == nil {
 				logRootSummary(req.Logf, "index done", info)
 			}
 		}
@@ -166,26 +170,50 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 	return nil
 }
 
-func rootSummary(ctx context.Context, q sqlQueryer, datasetID string) (RootInfo, error) {
-	query := `SELECT r.dataset_id, r.source_uri, r.last_scn, r.last_indexed_at,
+func rootSummary(ctx context.Context, q sqlQueryer, datasetID, driver string) (RootInfo, error) {
+	docsTable := localDocsTable(driver)
+	query := fmt.Sprintf(`SELECT r.dataset_id, r.source_uri, r.last_scn, r.last_indexed_at,
     (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets,
     (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 1) AS assets_archived,
     (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 0) AS assets_active,
     (SELECT COALESCE(SUM(size), 0) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets_size,
     (SELECT MAX(mod_time) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS last_asset_mod_time,
     (SELECT md5 FROM emb_asset a WHERE a.dataset_id = r.dataset_id ORDER BY mod_time DESC LIMIT 1) AS last_asset_md5,
-    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id) AS docs,
-    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 1) AS docs_archived,
-    (SELECT COUNT(*) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS docs_active,
-    (SELECT COALESCE(AVG(LENGTH(content)), 0) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS avg_doc_len,
-    (SELECT MAX(scn) FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id) AS last_doc_scn,
-    (SELECT embedding_model FROM _vec_emb_docs d WHERE d.dataset_id = r.dataset_id AND embedding_model <> '' ORDER BY scn DESC LIMIT 1) AS embedding_model,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id) AS docs,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 1) AS docs_archived,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS docs_active,
+    (SELECT COALESCE(AVG(LENGTH(content)), 0) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS avg_doc_len,
+    (SELECT MAX(scn) FROM %s d WHERE d.dataset_id = r.dataset_id) AS last_doc_scn,
+    (SELECT embedding_model FROM %s d WHERE d.dataset_id = r.dataset_id AND embedding_model <> '' ORDER BY scn DESC LIMIT 1) AS embedding_model,
     (SELECT COALESCE(MAX(last_scn), 0) FROM vec_sync_state s WHERE s.dataset_id = r.dataset_id) AS last_sync_scn,
     (SELECT GROUP_CONCAT(DISTINCT shadow_table) FROM vec_sync_state s WHERE s.dataset_id = r.dataset_id) AS upstream_shadow
-FROM emb_root r WHERE r.dataset_id = ?`
+FROM emb_root r WHERE r.dataset_id = ?`, docsTable, docsTable, docsTable, docsTable, docsTable, docsTable)
 	var info RootInfo
 	row := q.QueryRowContext(ctx, query, datasetID)
 	if err := row.Scan(&info.DatasetID, &info.SourceURI, &info.LastSCN, &info.LastIndexedAt, &info.Assets, &info.AssetsArchived, &info.AssetsActive, &info.AssetsSize, &info.LastAssetMod, &info.LastAssetMD5, &info.Documents, &info.DocsArchived, &info.DocsActive, &info.AvgDocLen, &info.LastDocSCN, &info.EmbeddingModel, &info.LastSyncSCN, &info.UpstreamShadow); err != nil {
+		if isMissingTableErr(err, "vec_sync_state") {
+			query = fmt.Sprintf(`SELECT r.dataset_id, r.source_uri, r.last_scn, r.last_indexed_at,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 1) AS assets_archived,
+    (SELECT COUNT(*) FROM emb_asset a WHERE a.dataset_id = r.dataset_id AND a.archived = 0) AS assets_active,
+    (SELECT COALESCE(SUM(size), 0) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS assets_size,
+    (SELECT MAX(mod_time) FROM emb_asset a WHERE a.dataset_id = r.dataset_id) AS last_asset_mod_time,
+    (SELECT md5 FROM emb_asset a WHERE a.dataset_id = r.dataset_id ORDER BY mod_time DESC LIMIT 1) AS last_asset_md5,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id) AS docs,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 1) AS docs_archived,
+    (SELECT COUNT(*) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS docs_active,
+    (SELECT COALESCE(AVG(LENGTH(content)), 0) FROM %s d WHERE d.dataset_id = r.dataset_id AND d.archived = 0) AS avg_doc_len,
+    (SELECT MAX(scn) FROM %s d WHERE d.dataset_id = r.dataset_id) AS last_doc_scn,
+    (SELECT embedding_model FROM %s d WHERE d.dataset_id = r.dataset_id AND embedding_model <> '' ORDER BY scn DESC LIMIT 1) AS embedding_model
+FROM emb_root r WHERE r.dataset_id = ?`, docsTable, docsTable, docsTable, docsTable, docsTable, docsTable)
+			row = q.QueryRowContext(ctx, query, datasetID)
+			if err := row.Scan(&info.DatasetID, &info.SourceURI, &info.LastSCN, &info.LastIndexedAt, &info.Assets, &info.AssetsArchived, &info.AssetsActive, &info.AssetsSize, &info.LastAssetMod, &info.LastAssetMD5, &info.Documents, &info.DocsArchived, &info.DocsActive, &info.AvgDocLen, &info.LastDocSCN, &info.EmbeddingModel); err != nil {
+				return RootInfo{}, err
+			}
+			info.LastSyncSCN = 0
+			info.UpstreamShadow = sql.NullString{}
+			return info, nil
+		}
 		return RootInfo{}, err
 	}
 	return info, nil

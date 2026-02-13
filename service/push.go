@@ -41,7 +41,9 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureSchema(ctx, local); err != nil {
+	driver := s.driver
+	docsTable := localDocsTable(driver)
+	if err := ensureSchema(ctx, local, driver); err != nil {
 		return err
 	}
 
@@ -64,10 +66,10 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 		if req.Logf != nil {
 			req.Logf("sync root=%s starting", spec.Name)
 		}
-		if err := ensureDataset(ctx, local, spec.Name, spec.Path); err != nil {
+		if err := ensureDataset(ctx, local, spec.Name, spec.Path, driver); err != nil {
 			return err
 		}
-		if err := upsertRootConfig(ctx, local, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+		if err := upsertRootConfig(ctx, local, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes, driver); err != nil {
 			return err
 		}
 		if req.DownstreamReset {
@@ -75,11 +77,11 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 				return err
 			}
 		}
-		if err := reconcileDownstreamBaseline(ctx, local, down, spec.Name, req.DownstreamShadow, dialect, req.Logf); err != nil {
+		if err := reconcileDownstreamBaseline(ctx, local, down, spec.Name, req.DownstreamShadow, docsTable, dialect, req.Logf); err != nil {
 			return err
 		}
 		if req.Logf != nil {
-			if pending, maxSCN, err := localPending(ctx, local, spec.Name, req.DownstreamShadow); err == nil {
+			if pending, maxSCN, err := localPending(ctx, local, spec.Name, req.DownstreamShadow, docsTable); err == nil {
 				req.Logf("sync root=%s shadow=%s start last_scn=%d pending=%d max_scn=%d", spec.Name, req.DownstreamShadow, pending.lastSCN, pending.count, maxSCN)
 			} else {
 				req.Logf("sync root=%s shadow=%s start pending=unknown err=%v", spec.Name, req.DownstreamShadow, err)
@@ -88,6 +90,7 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 		if err := pushShadowLog(ctx, local, down, pushConfig{
 			DatasetID:   spec.Name,
 			ShadowTable: req.DownstreamShadow,
+			DocsTable:   docsTable,
 			BatchSize:   req.SyncBatch,
 			Logf:        req.Logf,
 			Dialect:     dialect,
@@ -98,6 +101,7 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 		if req.ApplyDownstream {
 			if err := applyDownstream(ctx, local, down, applyConfig{
 				DatasetID: spec.Name,
+				DocsTable: docsTable,
 				BatchSize: req.SyncBatch,
 				Dialect:   dialect,
 				Driver:    req.DownstreamDriver,
@@ -116,6 +120,7 @@ func (s *Service) PushDownstream(ctx context.Context, req PushRequest) error {
 type pushConfig struct {
 	DatasetID   string
 	ShadowTable string
+	DocsTable   string
 	BatchSize   int
 	Logf        func(format string, args ...any)
 	Dialect     *info.Dialect
@@ -145,11 +150,11 @@ func pushShadowLog(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg p
 	totalUpdate := 0
 	totalDelete := 0
 	for {
-		rows, err := local.QueryContext(ctx, `SELECT id, asset_id, content, meta, embedding, embedding_model, scn, archived
-FROM _vec_emb_docs
+		rows, err := local.QueryContext(ctx, fmt.Sprintf(`SELECT id, asset_id, content, meta, embedding, embedding_model, scn, archived
+FROM %s
 WHERE dataset_id = ? AND scn > ?
 ORDER BY scn
-LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
+LIMIT ?`, cfg.DocsTable), cfg.DatasetID, lastSCN, cfg.BatchSize)
 		if err != nil {
 			return err
 		}
@@ -178,7 +183,7 @@ LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 			return nil
 		}
 		if len(batch) == cfg.BatchSize {
-			expanded, err := loadRowsBySCN(ctx, local, cfg.DatasetID, maxSCN)
+			expanded, err := loadRowsBySCN(ctx, local, cfg.DatasetID, maxSCN, cfg.DocsTable)
 			if err != nil {
 				return err
 			}
@@ -282,7 +287,7 @@ type pendingStats struct {
 	count   int64
 }
 
-func localPending(ctx context.Context, db *sql.DB, datasetID, shadowTable string) (pendingStats, int64, error) {
+func localPending(ctx context.Context, db *sql.DB, datasetID, shadowTable, docsTable string) (pendingStats, int64, error) {
 	stateShadow := pushShadowPrefix + shadowTable
 	lastSCN, err := localLastSCN(ctx, db, datasetID, stateShadow)
 	if err != nil {
@@ -290,9 +295,9 @@ func localPending(ctx context.Context, db *sql.DB, datasetID, shadowTable string
 	}
 	var maxSCN int64
 	var count int64
-	err = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(scn), 0), COUNT(*)
-FROM _vec_emb_docs
-WHERE dataset_id = ? AND scn > ?`, datasetID, lastSCN).Scan(&maxSCN, &count)
+	err = db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(scn), 0), COUNT(*)
+FROM %s
+WHERE dataset_id = ? AND scn > ?`, docsTable), datasetID, lastSCN).Scan(&maxSCN, &count)
 	if err != nil {
 		return pendingStats{}, 0, err
 	}
@@ -361,23 +366,26 @@ func deleteLocalSyncState(ctx context.Context, local *sql.DB, datasetID, shadowT
 	}
 	for _, shadow := range shadows {
 		if _, err := local.ExecContext(ctx, `DELETE FROM vec_sync_state WHERE dataset_id = ? AND shadow_table = ?`, datasetID, shadow); err != nil {
+			if isMissingTableErr(err, "vec_sync_state") {
+				return nil
+			}
 			return err
 		}
 	}
 	return nil
 }
 
-func localMaxSCN(ctx context.Context, db *sql.DB, datasetID string) (int64, error) {
+func localMaxSCN(ctx context.Context, db *sql.DB, datasetID, docsTable string) (int64, error) {
 	var maxSCN int64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(scn), 0) FROM _vec_emb_docs WHERE dataset_id = ?`, datasetID).Scan(&maxSCN); err != nil {
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(scn), 0) FROM %s WHERE dataset_id = ?`, docsTable), datasetID).Scan(&maxSCN); err != nil {
 		return 0, err
 	}
 	return maxSCN, nil
 }
 
-func reconcileDownstreamBaseline(ctx context.Context, local *sql.DB, downstream *sql.DB, datasetID, shadowTable string, dialect *info.Dialect, logf func(format string, args ...any)) error {
+func reconcileDownstreamBaseline(ctx context.Context, local *sql.DB, downstream *sql.DB, datasetID, shadowTable, docsTable string, dialect *info.Dialect, logf func(format string, args ...any)) error {
 	stateShadow := pushShadowPrefix + shadowTable
-	localMax, err := localMaxSCN(ctx, local, datasetID)
+	localMax, err := localMaxSCN(ctx, local, datasetID, docsTable)
 	if err != nil {
 		return err
 	}
@@ -438,6 +446,7 @@ func detectDownstreamDialect(ctx context.Context, db *sql.DB, logf func(format s
 
 type applyConfig struct {
 	DatasetID string
+	DocsTable string
 	BatchSize int
 	Dialect   *info.Dialect
 	Driver    string
@@ -472,7 +481,7 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 		if err := applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNMerge); err != nil {
 			return err
 		}
-		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN)
+		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN, cfg.DocsTable)
 		if err != nil {
 			return err
 		}
@@ -497,7 +506,7 @@ func applyDownstream(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 		if err := applyDatasetSCN(ctx, local, downstream, cfg, buildDatasetSCNUpsertMySQL); err != nil {
 			return err
 		}
-		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN)
+		seedSCN, err := seedSCNValue(ctx, local, cfg.DatasetID, docsSCN, cfg.DocsTable)
 		if err != nil {
 			return err
 		}
@@ -521,11 +530,11 @@ func applyShadowDocs(ctx context.Context, local *sql.DB, downstream *sql.DB, cfg
 		return 0, err
 	}
 	for {
-		rows, err := local.QueryContext(ctx, `SELECT id, content, meta, embedding, embedding_model, scn, archived
-FROM _vec_emb_docs
+		rows, err := local.QueryContext(ctx, fmt.Sprintf(`SELECT id, content, meta, embedding, embedding_model, scn, archived
+FROM %s
 WHERE dataset_id = ? AND scn > ?
 ORDER BY scn
-LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
+LIMIT ?`, cfg.DocsTable), cfg.DatasetID, lastSCN, cfg.BatchSize)
 		if err != nil {
 			return lastSCN, err
 		}
@@ -554,7 +563,7 @@ LIMIT ?`, cfg.DatasetID, lastSCN, cfg.BatchSize)
 			return lastSCN, nil
 		}
 		if len(batch) == cfg.BatchSize {
-			expanded, err := loadRowsBySCN(ctx, local, cfg.DatasetID, maxSCN)
+			expanded, err := loadRowsBySCN(ctx, local, cfg.DatasetID, maxSCN, cfg.DocsTable)
 			if err != nil {
 				return lastSCN, err
 			}
@@ -587,20 +596,20 @@ func seedUpstreamState(ctx context.Context, local *sql.DB, datasetID string, las
 	return nil
 }
 
-func seedSCNValue(ctx context.Context, local *sql.DB, datasetID string, appliedSCN int64) (int64, error) {
+func seedSCNValue(ctx context.Context, local *sql.DB, datasetID string, appliedSCN int64, docsTable string) (int64, error) {
 	if appliedSCN > 0 {
 		return appliedSCN, nil
 	}
-	maxSCN, err := localDocsMaxSCN(ctx, local, datasetID)
+	maxSCN, err := localDocsMaxSCN(ctx, local, datasetID, docsTable)
 	if err != nil {
 		return 0, err
 	}
 	return maxSCN, nil
 }
 
-func localDocsMaxSCN(ctx context.Context, db *sql.DB, datasetID string) (int64, error) {
+func localDocsMaxSCN(ctx context.Context, db *sql.DB, datasetID, docsTable string) (int64, error) {
 	var maxSCN int64
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(scn), 0) FROM _vec_emb_docs WHERE dataset_id = ?`, datasetID).Scan(&maxSCN)
+	err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(MAX(scn), 0) FROM %s WHERE dataset_id = ?`, docsTable), datasetID).Scan(&maxSCN)
 	if err != nil {
 		return 0, err
 	}
@@ -967,11 +976,11 @@ ON DUPLICATE KEY UPDATE
 	return query, []any{datasetID, nextSCN}
 }
 
-func loadRowsBySCN(ctx context.Context, db *sql.DB, datasetID string, scn int64) ([]pushRow, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, asset_id, content, meta, embedding, embedding_model, scn, archived
-FROM _vec_emb_docs
+func loadRowsBySCN(ctx context.Context, db *sql.DB, datasetID string, scn int64, docsTable string) ([]pushRow, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT id, asset_id, content, meta, embedding, embedding_model, scn, archived
+FROM %s
 WHERE dataset_id = ? AND scn = ?
-ORDER BY id`, datasetID, scn)
+ORDER BY id`, docsTable), datasetID, scn)
 	if err != nil {
 		return nil, err
 	}
@@ -1048,12 +1057,29 @@ func localLastSCN(ctx context.Context, db *sql.DB, datasetID, shadowTable string
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
-	return last, err
+	if err != nil {
+		if isMissingTableErr(err, "vec_sync_state") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return last, nil
 }
 
 func upsertSyncState(ctx context.Context, db *sql.DB, datasetID, shadowTable string, scn int64) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO vec_sync_state(dataset_id, shadow_table, last_scn, updated_at)
 VALUES(?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(dataset_id, shadow_table) DO UPDATE SET last_scn=excluded.last_scn, updated_at=CURRENT_TIMESTAMP`, datasetID, shadowTable, scn)
+	if err != nil && isMissingTableErr(err, "vec_sync_state") {
+		return nil
+	}
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "error 1064") || strings.Contains(msg, "you have an error in your sql syntax") {
+			_, err = db.ExecContext(ctx, `INSERT INTO vec_sync_state(dataset_id, shadow_table, last_scn, updated_at)
+VALUES(?,?,?,CURRENT_TIMESTAMP)
+ON DUPLICATE KEY UPDATE last_scn=VALUES(last_scn), updated_at=CURRENT_TIMESTAMP`, datasetID, shadowTable, scn)
+		}
+	}
 	return err
 }

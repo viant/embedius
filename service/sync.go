@@ -23,7 +23,11 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := ensureSchema(ctx, db); err != nil {
+	driver := s.driver
+	if driver != "sqlite" {
+		return fmt.Errorf("sync: upstream pull requires sqlite store")
+	}
+	if err := ensureSchema(ctx, db, driver); err != nil {
 		return err
 	}
 
@@ -45,10 +49,10 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 		if req.Logf != nil {
 			req.Logf("sync root=%s starting", spec.Name)
 		}
-		if err := ensureDataset(ctx, db, spec.Name, spec.Path); err != nil {
+		if err := ensureDataset(ctx, db, spec.Name, spec.Path, driver); err != nil {
 			return err
 		}
-		if err := upsertRootConfig(ctx, db, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes); err != nil {
+		if err := upsertRootConfig(ctx, db, spec.Name, encodeGlobList(spec.Include), encodeGlobList(spec.Exclude), spec.MaxSizeBytes, driver); err != nil {
 			return err
 		}
 		filter := newSyncFilter(spec)
@@ -77,7 +81,7 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 		}); err != nil {
 			return err
 		}
-		if err := syncRootConfig(ctx, db, up, spec.Name, req.Logf); err != nil {
+		if err := syncRootConfig(ctx, db, up, spec.Name, req.Logf, driver); err != nil {
 			return err
 		}
 	}
@@ -87,7 +91,7 @@ func (s *Service) Sync(ctx context.Context, req SyncRequest) error {
 	return nil
 }
 
-func syncRootConfig(ctx context.Context, local *sql.DB, upstream *sql.DB, datasetID string, logf func(format string, args ...any)) error {
+func syncRootConfig(ctx context.Context, local *sql.DB, upstream *sql.DB, datasetID string, logf func(format string, args ...any), driver string) error {
 	row := upstream.QueryRowContext(ctx, `SELECT include_globs, exclude_globs, max_size_bytes FROM emb_root_config WHERE dataset_id = ?`, datasetID)
 	var include sql.NullString
 	var exclude sql.NullString
@@ -98,7 +102,7 @@ func syncRootConfig(ctx context.Context, local *sql.DB, upstream *sql.DB, datase
 		}
 		return err
 	}
-	if err := upsertRootConfig(ctx, local, datasetID, include.String, exclude.String, maxSize.Int64); err != nil {
+	if err := upsertRootConfig(ctx, local, datasetID, include.String, exclude.String, maxSize.Int64, driver); err != nil {
 		return err
 	}
 	if logf != nil {

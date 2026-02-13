@@ -25,12 +25,15 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) ([]SearchResult
 	if err != nil {
 		return nil, err
 	}
+	if s.driver != "" && s.driver != "sqlite" {
+		return nil, fmt.Errorf("search requires sqlite store")
+	}
 
 	db, err := s.ensureDB(ctx, req.DBPath, false)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := ensureSchemaConn(ctx, db)
+	conn, err := ensureSchemaConn(ctx, db, "sqlite")
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +83,7 @@ func (s *Service) SearchWithEmbedding(ctx context.Context, req SearchRequest, qv
 	if err != nil {
 		return nil, err
 	}
-	conn, err := ensureSchemaConn(ctx, db)
+	conn, err := ensureSchemaConn(ctx, db, s.driver)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +152,7 @@ func (s *Service) matchWithFreshDB(ctx context.Context, req SearchRequest, blob 
 		_ = db.Close()
 		return nil, err
 	}
-	conn, err := ensureSchemaConn(ctx, db)
+	conn, err := ensureSchemaConn(ctx, db, s.driver)
 	if err != nil {
 		_ = db.Close()
 		return nil, err

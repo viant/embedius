@@ -30,6 +30,29 @@ type sqlQueryer interface {
 	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 }
 
+type sqlDialect string
+
+const (
+	dialectSQLite sqlDialect = "sqlite"
+	dialectMySQL  sqlDialect = "mysql"
+)
+
+func resolveDialect(driver string) sqlDialect {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "mysql", "mariadb":
+		return dialectMySQL
+	default:
+		return dialectSQLite
+	}
+}
+
+func localDocsTable(driver string) string {
+	if resolveDialect(driver) == dialectMySQL {
+		return "shadow_vec_docs"
+	}
+	return "_vec_emb_docs"
+}
+
 type fileItem struct {
 	abs     string
 	rel     string
@@ -244,7 +267,11 @@ func splitFile(relPath string, data []byte, factory *splitter.Factory) ([]schema
 	return docs, nil
 }
 
-func ensureSchema(ctx context.Context, q sqlQueryer) error {
+func ensureSchema(ctx context.Context, q sqlQueryer, driver string) error {
+	dialect := resolveDialect(driver)
+	if dialect != dialectSQLite {
+		return nil
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS vec_dataset (
 			dataset_id TEXT PRIMARY KEY,
@@ -328,26 +355,49 @@ func ensureSchema(ctx context.Context, q sqlQueryer) error {
 	return nil
 }
 
-func ensureDataset(ctx context.Context, q sqlQueryer, datasetID, sourcePath string) error {
-	if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO vec_dataset(dataset_id, description, source_uri, last_scn) VALUES(?,?,?,0)`, datasetID, datasetID, sourcePath); err != nil {
+func ensureDataset(ctx context.Context, q sqlQueryer, datasetID, sourcePath, driver string) error {
+	dialect := resolveDialect(driver)
+	switch dialect {
+	case dialectMySQL:
+		if _, err := q.ExecContext(ctx, `INSERT IGNORE INTO vec_dataset(dataset_id, description, source_uri, last_scn) VALUES(?,?,?,0)`, datasetID, datasetID, sourcePath); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `INSERT IGNORE INTO emb_root(dataset_id, source_uri, description, last_indexed_at, last_scn) VALUES(?,?,?,?,0)`, datasetID, sourcePath, datasetID, time.Now())
+		return err
+	default:
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO vec_dataset(dataset_id, description, source_uri, last_scn) VALUES(?,?,?,0)`, datasetID, datasetID, sourcePath); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO emb_root(dataset_id, source_uri, description, last_indexed_at, last_scn) VALUES(?,?,?,?,0)`, datasetID, sourcePath, datasetID, time.Now())
 		return err
 	}
-	_, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO emb_root(dataset_id, source_uri, description, last_indexed_at, last_scn) VALUES(?,?,?,?,0)`, datasetID, sourcePath, datasetID, time.Now())
-	return err
 }
 
-func upsertRootConfig(ctx context.Context, q sqlQueryer, datasetID, includeGlobs, excludeGlobs string, maxSizeBytes int64) error {
+func upsertRootConfig(ctx context.Context, q sqlQueryer, datasetID, includeGlobs, excludeGlobs string, maxSizeBytes int64, driver string) error {
 	if datasetID == "" {
 		return nil
 	}
-	_, err := q.ExecContext(ctx, `INSERT INTO emb_root_config(dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
+	dialect := resolveDialect(driver)
+	switch dialect {
+	case dialectMySQL:
+		_, err := q.ExecContext(ctx, `INSERT INTO emb_root_config(dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
+VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+ON DUPLICATE KEY UPDATE
+include_globs=VALUES(include_globs),
+exclude_globs=VALUES(exclude_globs),
+max_size_bytes=VALUES(max_size_bytes),
+updated_at=CURRENT_TIMESTAMP`, datasetID, includeGlobs, excludeGlobs, maxSizeBytes)
+		return err
+	default:
+		_, err := q.ExecContext(ctx, `INSERT INTO emb_root_config(dataset_id, include_globs, exclude_globs, max_size_bytes, updated_at)
 VALUES(?,?,?,?,CURRENT_TIMESTAMP)
 ON CONFLICT(dataset_id) DO UPDATE SET
 include_globs=excluded.include_globs,
 exclude_globs=excluded.exclude_globs,
 max_size_bytes=excluded.max_size_bytes,
 updated_at=CURRENT_TIMESTAMP`, datasetID, includeGlobs, excludeGlobs, maxSizeBytes)
-	return err
+		return err
+	}
 }
 
 func encodeGlobList(globs []string) string {
@@ -380,9 +430,17 @@ func loadAssets(ctx context.Context, q sqlQueryer, datasetID string) (map[string
 	return assets, rows.Err()
 }
 
-func nextSCN(ctx context.Context, q sqlQueryer, datasetID string) (uint64, error) {
-	if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO vec_dataset_scn(dataset_id, next_scn) VALUES(?, 0)`, datasetID); err != nil {
-		return 0, err
+func nextSCN(ctx context.Context, q sqlQueryer, datasetID, driver string) (uint64, error) {
+	dialect := resolveDialect(driver)
+	switch dialect {
+	case dialectMySQL:
+		if _, err := q.ExecContext(ctx, `INSERT IGNORE INTO vec_dataset_scn(dataset_id, next_scn) VALUES(?, 0)`, datasetID); err != nil {
+			return 0, err
+		}
+	default:
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO vec_dataset_scn(dataset_id, next_scn) VALUES(?, 0)`, datasetID); err != nil {
+			return 0, err
+		}
 	}
 	if _, err := q.ExecContext(ctx, `UPDATE vec_dataset_scn SET next_scn = next_scn + 1 WHERE dataset_id = ?`, datasetID); err != nil {
 		return 0, err
@@ -414,8 +472,24 @@ func extractMetaPath(metaStr string) string {
 	return ""
 }
 
-func upsertAsset(ctx context.Context, q sqlQueryer, datasetID string, f fileItem, scn uint64) error {
-	_, err := q.ExecContext(ctx, `INSERT INTO emb_asset(dataset_id, asset_id, path, md5, size, mod_time, scn, archived)
+func upsertAsset(ctx context.Context, q sqlQueryer, datasetID string, f fileItem, scn uint64, driver string) error {
+	dialect := resolveDialect(driver)
+	switch dialect {
+	case dialectMySQL:
+		_, err := q.ExecContext(ctx, `INSERT INTO emb_asset(dataset_id, asset_id, path, md5, size, mod_time, scn, archived)
+VALUES(?,?,?,?,?,?,?,0)
+ON DUPLICATE KEY UPDATE
+	path=VALUES(path),
+	md5=VALUES(md5),
+	size=VALUES(size),
+	mod_time=VALUES(mod_time),
+	scn=VALUES(scn),
+	archived=0`,
+			datasetID, f.assetID, f.rel, f.md5, f.size, f.modTime, scn,
+		)
+		return err
+	default:
+		_, err := q.ExecContext(ctx, `INSERT INTO emb_asset(dataset_id, asset_id, path, md5, size, mod_time, scn, archived)
 VALUES(?,?,?,?,?,?,?,0)
 ON CONFLICT(dataset_id, asset_id) DO UPDATE SET
 	path=excluded.path,
@@ -424,13 +498,15 @@ ON CONFLICT(dataset_id, asset_id) DO UPDATE SET
 	mod_time=excluded.mod_time,
 	scn=excluded.scn,
 	archived=0`,
-		datasetID, f.assetID, f.rel, f.md5, f.size, f.modTime, scn,
-	)
-	return err
+			datasetID, f.assetID, f.rel, f.md5, f.size, f.modTime, scn,
+		)
+		return err
+	}
 }
 
-func upsertDocuments(ctx context.Context, q sqlQueryer, datasetID, assetID string, docs []schema.Document, emb embeddings.Embedder, batchSize int, scn uint64, md5hex, relPath, model string) (int, error) {
-	if _, err := q.ExecContext(ctx, `DELETE FROM _vec_emb_docs WHERE dataset_id = ? AND asset_id = ?`, datasetID, assetID); err != nil {
+func upsertDocuments(ctx context.Context, q sqlQueryer, datasetID, assetID string, docs []schema.Document, emb embeddings.Embedder, batchSize int, scn uint64, md5hex, relPath, model, driver string) (int, error) {
+	docsTable := localDocsTable(driver)
+	if _, err := q.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE dataset_id = ? AND asset_id = ?`, docsTable), datasetID, assetID); err != nil {
 		return 0, err
 	}
 	if len(docs) == 0 {
@@ -440,7 +516,21 @@ func upsertDocuments(ctx context.Context, q sqlQueryer, datasetID, assetID strin
 	if err != nil {
 		return 0, err
 	}
-	stmt, err := q.PrepareContext(ctx, `INSERT INTO _vec_emb_docs(dataset_id, id, asset_id, content, meta, embedding, embedding_model, scn, archived)
+	var stmtSQL string
+	switch resolveDialect(driver) {
+	case dialectMySQL:
+		stmtSQL = fmt.Sprintf(`INSERT INTO %s(dataset_id, id, asset_id, content, meta, embedding, embedding_model, scn, archived)
+VALUES(?,?,?,?,?,?,?,?,0)
+ON DUPLICATE KEY UPDATE
+	asset_id=VALUES(asset_id),
+	content=VALUES(content),
+	meta=VALUES(meta),
+	embedding=VALUES(embedding),
+	embedding_model=VALUES(embedding_model),
+	scn=VALUES(scn),
+	archived=0`, docsTable)
+	default:
+		stmtSQL = fmt.Sprintf(`INSERT INTO %s(dataset_id, id, asset_id, content, meta, embedding, embedding_model, scn, archived)
 VALUES(?,?,?,?,?,?,?,?,0)
 ON CONFLICT(dataset_id, id) DO UPDATE SET
 	asset_id=excluded.asset_id,
@@ -449,7 +539,9 @@ ON CONFLICT(dataset_id, id) DO UPDATE SET
 	embedding=excluded.embedding,
 	embedding_model=excluded.embedding_model,
 	scn=excluded.scn,
-	archived=0`)
+	archived=0`, docsTable)
+	}
+	stmt, err := q.PrepareContext(ctx, stmtSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -552,16 +644,18 @@ func decorateMeta(metaIn map[string]interface{}, datasetID, assetID, relPath, md
 	return string(data), nil
 }
 
-func archiveAsset(ctx context.Context, q sqlQueryer, datasetID, assetID string, scn uint64) error {
+func archiveAsset(ctx context.Context, q sqlQueryer, datasetID, assetID string, scn uint64, driver string) error {
 	if _, err := q.ExecContext(ctx, `UPDATE emb_asset SET archived=1, scn=? WHERE dataset_id=? AND asset_id=?`, scn, datasetID, assetID); err != nil {
 		return err
 	}
-	_, err := q.ExecContext(ctx, `UPDATE _vec_emb_docs SET archived=1, scn=? WHERE dataset_id=? AND asset_id=?`, scn, datasetID, assetID)
+	docsTable := localDocsTable(driver)
+	_, err := q.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET archived=1, scn=? WHERE dataset_id=? AND asset_id=?`, docsTable), scn, datasetID, assetID)
 	return err
 }
 
-func pruneArchived(ctx context.Context, q sqlQueryer, datasetID string) error {
-	if _, err := q.ExecContext(ctx, `DELETE FROM _vec_emb_docs WHERE dataset_id=? AND archived=1`, datasetID); err != nil {
+func pruneArchived(ctx context.Context, q sqlQueryer, datasetID, driver string) error {
+	docsTable := localDocsTable(driver)
+	if _, err := q.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE dataset_id=? AND archived=1`, docsTable), datasetID); err != nil {
 		return err
 	}
 	_, err := q.ExecContext(ctx, `DELETE FROM emb_asset WHERE dataset_id=? AND archived=1`, datasetID)
@@ -572,16 +666,20 @@ func pruneMaxSCN(ctx context.Context, q sqlQueryer, datasetID, syncShadow string
 	var last int64
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(last_scn), 0) FROM vec_sync_state WHERE dataset_id = ? AND shadow_table = ?`, datasetID, syncShadow).Scan(&last)
 	if err != nil {
+		if isMissingTableErr(err, "vec_sync_state") {
+			return 0, nil
+		}
 		return 0, err
 	}
 	return last, nil
 }
 
-func pruneArchivedBefore(ctx context.Context, q sqlQueryer, datasetID string, scn int64) error {
+func pruneArchivedBefore(ctx context.Context, q sqlQueryer, datasetID string, scn int64, driver string) error {
 	if scn <= 0 {
 		return nil
 	}
-	if _, err := q.ExecContext(ctx, `DELETE FROM _vec_emb_docs WHERE dataset_id = ? AND archived = 1 AND scn <= ?`, datasetID, scn); err != nil {
+	docsTable := localDocsTable(driver)
+	if _, err := q.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE dataset_id = ? AND archived = 1 AND scn <= ?`, docsTable), datasetID, scn); err != nil {
 		return err
 	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM emb_asset WHERE dataset_id = ? AND archived = 1 AND scn <= ?`, datasetID, scn); err != nil {
@@ -590,28 +688,29 @@ func pruneArchivedBefore(ctx context.Context, q sqlQueryer, datasetID string, sc
 	return nil
 }
 
-func checkIntegrity(ctx context.Context, q sqlQueryer, datasetID string) (*IntegrityStats, error) {
+func checkIntegrity(ctx context.Context, q sqlQueryer, datasetID, driver string) (*IntegrityStats, error) {
 	var stats IntegrityStats
 	stats.DatasetID = datasetID
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*), SUM(CASE WHEN archived=1 THEN 1 ELSE 0 END), SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END)
-FROM _vec_emb_docs WHERE dataset_id = ?`, datasetID).Scan(&stats.Docs, &stats.DocsArchived, &stats.DocsActive); err != nil {
+	docsTable := localDocsTable(driver)
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*), SUM(CASE WHEN archived=1 THEN 1 ELSE 0 END), SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END)
+FROM %s WHERE dataset_id = ?`, docsTable), datasetID).Scan(&stats.Docs, &stats.DocsArchived, &stats.DocsActive); err != nil {
 		return nil, err
 	}
 	if err := q.QueryRowContext(ctx, `SELECT COUNT(*), SUM(CASE WHEN archived=1 THEN 1 ELSE 0 END), SUM(CASE WHEN archived=0 THEN 1 ELSE 0 END)
 FROM emb_asset WHERE dataset_id = ?`, datasetID).Scan(&stats.Assets, &stats.AssetsArchived, &stats.AssetsActive); err != nil {
 		return nil, err
 	}
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM _vec_emb_docs d LEFT JOIN emb_asset a
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s d LEFT JOIN emb_asset a
 ON a.dataset_id = d.dataset_id AND a.asset_id = d.asset_id
-WHERE d.dataset_id = ? AND a.asset_id IS NULL`, datasetID).Scan(&stats.OrphanDocs); err != nil {
+WHERE d.dataset_id = ? AND a.asset_id IS NULL`, docsTable), datasetID).Scan(&stats.OrphanDocs); err != nil {
 		return nil, err
 	}
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM emb_asset a LEFT JOIN _vec_emb_docs d
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM emb_asset a LEFT JOIN %s d
 ON d.dataset_id = a.dataset_id AND d.asset_id = a.asset_id
-WHERE a.dataset_id = ? AND d.id IS NULL`, datasetID).Scan(&stats.OrphanAssets); err != nil {
+WHERE a.dataset_id = ? AND d.id IS NULL`, docsTable), datasetID).Scan(&stats.OrphanAssets); err != nil {
 		return nil, err
 	}
-	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM _vec_emb_docs WHERE dataset_id = ? AND embedding IS NULL`, datasetID).Scan(&stats.MissingEmbeddings); err != nil {
+	if err := q.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE dataset_id = ? AND embedding IS NULL`, docsTable), datasetID).Scan(&stats.MissingEmbeddings); err != nil {
 		return nil, err
 	}
 	return &stats, nil
@@ -664,6 +763,21 @@ func fallbackSearch(ctx context.Context, q sqlQueryer, dataset string, qvec []fl
 		})
 	}
 	return out, nil
+}
+
+func isMissingTableErr(err error, table string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no such table") && strings.Contains(msg, strings.ToLower(table)) {
+		return true
+	}
+	// MySQL: Error 1146: Table 'db.table' doesn't exist
+	if strings.Contains(msg, "error 1146") && strings.Contains(msg, "doesn't exist") && strings.Contains(msg, strings.ToLower(table)) {
+		return true
+	}
+	return false
 }
 
 func cosine(a, b []float32) float32 {

@@ -12,9 +12,16 @@ import (
 // Config defines root mappings for batch operations.
 type Config struct {
 	DB        string                `yaml:"db"`
+	Store     StoreConfig           `yaml:"store"`
 	Roots     map[string]RootConfig `yaml:"roots"`
 	Upstreams []UpstreamConfig      `yaml:"upstreams"`
 	MCPServer MCPServerConfig       `yaml:"mcpServer"`
+}
+
+// StoreConfig defines vector store settings.
+type StoreConfig struct {
+	DSN    string `yaml:"dsn"`
+	Driver string `yaml:"driver"`
 }
 
 // RootConfig defines per-root settings.
@@ -78,6 +85,13 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if cfg.Store.DSN != "" {
+		if expanded, err := expandStoreDSN(cfg.Store.DSN, cfg.Store.Driver); err == nil {
+			cfg.Store.DSN = expanded
+		} else {
+			return nil, err
+		}
+	}
 	for name, root := range cfg.Roots {
 		if root.Path == "" {
 			continue
@@ -107,4 +121,15 @@ func expandUserPath(path string) (string, error) {
 		return home, nil
 	}
 	return filepath.Join(home, path[2:]), nil
+}
+
+func expandStoreDSN(dsn, driver string) (string, error) {
+	if dsn == "" {
+		return dsn, nil
+	}
+	// Expand user path only for sqlite-like DSNs or plain paths.
+	if driver == "sqlite" || dsn[0] == '~' || dsn[0] == '/' || strings.HasPrefix(dsn, "file:") {
+		return expandUserPath(dsn)
+	}
+	return dsn, nil
 }
