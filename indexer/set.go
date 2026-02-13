@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/viant/afs"
 	"github.com/viant/afs/file"
@@ -61,7 +62,9 @@ func (s *Set) ensureEmbedder(opts []vectorstores.Option) []vectorstores.Option {
 
 // Index indexes content at the specified URI
 func (s *Set) Index(ctx context.Context, URI string) error {
-	fmt.Printf("embedius: index start location=%q namespace=%q\n", URI, s.namespace)
+	start := time.Now()
+	syncRequested := upstreamSyncConfig(ctx) != nil
+	fmt.Printf("embedius: index start location=%q namespace=%q sync=%t\n", URI, s.namespace, syncRequested)
 	ctx = fs.WithIndexRoot(ctx, URI)
 	if cfg := upstreamSyncConfig(ctx); cfg != nil {
 		if syncer, ok := s.vectorDb.(vectordb.UpstreamSyncer); ok {
@@ -99,7 +102,7 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 	}
 
 	if len(toAddDocuments) == 0 && len(toRemove) == 0 {
-		fmt.Printf("embedius: index no-op location=%q\n", URI)
+		fmt.Printf("embedius: index no-op location=%q duration=%s sync=%t\n", URI, time.Since(start), syncRequested)
 		return nil // Nothing changed
 	}
 

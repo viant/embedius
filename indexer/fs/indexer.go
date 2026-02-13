@@ -275,6 +275,10 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 			if withMD5, ok := object.(interface{ MD5() string }); ok {
 				md5hex = strings.TrimSpace(withMD5.MD5())
 			}
+			// If upstream md5 matches, treat as unchanged even when size is unknown or mismatched.
+			if md5hex != "" && meta.MD5 != "" && strings.EqualFold(md5hex, meta.MD5) {
+				return nil, nil, nil
+			}
 			if meta.Size == object.Size() && (md5hex == "" || md5hex == meta.MD5) {
 				return nil, nil, nil
 			}
