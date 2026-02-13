@@ -1,11 +1,13 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/viant/scy/cred/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,6 +24,7 @@ type Config struct {
 type StoreConfig struct {
 	DSN    string `yaml:"dsn"`
 	Driver string `yaml:"driver"`
+	Secret string `yaml:"secret,omitempty"`
 }
 
 // RootConfig defines per-root settings.
@@ -38,6 +41,7 @@ type UpstreamConfig struct {
 	Name               string `yaml:"name"`
 	Driver             string `yaml:"driver"`
 	DSN                string `yaml:"dsn"`
+	Secret             string `yaml:"secret,omitempty"`
 	Shadow             string `yaml:"shadow"`
 	Batch              int    `yaml:"batch"`
 	Force              bool   `yaml:"force"`
@@ -92,6 +96,13 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if cfg.Store.Secret != "" {
+		if expanded, err := ExpandDSNWithSecret(context.Background(), cfg.Store.DSN, cfg.Store.Secret); err == nil {
+			cfg.Store.DSN = expanded
+		} else {
+			return nil, err
+		}
+	}
 	for name, root := range cfg.Roots {
 		if root.Path == "" {
 			continue
@@ -102,6 +113,17 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		root.Path = expanded
 		cfg.Roots[name] = root
+	}
+	for i, up := range cfg.Upstreams {
+		if strings.TrimSpace(up.Secret) == "" {
+			continue
+		}
+		expanded, err := ExpandDSNWithSecret(context.Background(), up.DSN, up.Secret)
+		if err != nil {
+			return nil, err
+		}
+		up.DSN = expanded
+		cfg.Upstreams[i] = up
 	}
 	return &cfg, nil
 }
@@ -132,4 +154,21 @@ func expandStoreDSN(dsn, driver string) (string, error) {
 		return expandUserPath(dsn)
 	}
 	return dsn, nil
+}
+
+// ExpandDSNWithSecret loads a secret and expands placeholders in the DSN.
+func ExpandDSNWithSecret(ctx context.Context, dsn, secretRef string) (string, error) {
+	secretRef = strings.TrimSpace(secretRef)
+	if secretRef == "" {
+		return dsn, nil
+	}
+	if strings.TrimSpace(dsn) == "" {
+		return "", fmt.Errorf("secret %q provided but dsn is empty", secretRef)
+	}
+	svc := secret.New()
+	sec, err := svc.Lookup(ctx, secret.Resource(secretRef))
+	if err != nil {
+		return "", err
+	}
+	return sec.Expand(dsn), nil
 }

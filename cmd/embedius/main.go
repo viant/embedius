@@ -94,6 +94,7 @@ func indexCmd(args []string) {
 	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
 	storeDSN := flags.String("store-dsn", "", "store dsn for indexing (optional, sqlite only)")
 	storeDriver := flags.String("store-driver", "", "store driver (optional, auto-detect if empty)")
+	storeSecret := flags.String("store-secret", "", "store secret ref for DSN expansion (optional)")
 	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
 	root := flags.String("root", "", "root/dataset name (required)")
 	rootPath := flags.String("path", "", "filesystem path to index (required)")
@@ -114,6 +115,7 @@ func indexCmd(args []string) {
 	ollamaBaseURL := flags.String("ollama-base-url", "", "ollama base URL (or OLLAMA_BASE_URL)")
 	upstreamDriver := flags.String("upstream-driver", "", "upstream sql driver (optional, auto-detect if empty)")
 	upstreamDSN := flags.String("upstream-dsn", "", "upstream dsn (optional)")
+	upstreamSecret := flags.String("upstream-secret", "", "upstream secret ref for DSN expansion (optional)")
 	upstreamShadow := flags.String("upstream-shadow", "shadow_vec_docs", "upstream shadow table name")
 	syncBatch := flags.Int("sync-batch", 200, "upstream sync batch size")
 	progress := flags.Bool("progress", false, "show indexing progress")
@@ -143,6 +145,13 @@ func indexCmd(args []string) {
 	storeDSNVal := strings.TrimSpace(*storeDSN)
 	if storeDSNVal == "" {
 		storeDSNVal = cfgStore.DSN
+	}
+	if strings.TrimSpace(*storeSecret) != "" {
+		expanded, err := service.ExpandDSNWithSecret(ctx, storeDSNVal, *storeSecret)
+		if err != nil {
+			log.Fatalf("index: store secret: %v", err)
+		}
+		storeDSNVal = expanded
 	}
 	storeDriverVal := strings.TrimSpace(*storeDriver)
 	if storeDriverVal == "" {
@@ -184,9 +193,17 @@ func indexCmd(args []string) {
 	}
 	defer func() { _ = svc.Close() }()
 
+	upstreamDSNVal := strings.TrimSpace(*upstreamDSN)
+	if strings.TrimSpace(*upstreamSecret) != "" {
+		expanded, err := service.ExpandDSNWithSecret(ctx, upstreamDSNVal, *upstreamSecret)
+		if err != nil {
+			log.Fatalf("index: upstream secret: %v", err)
+		}
+		upstreamDSNVal = expanded
+	}
 	upstreamDriverVal := *upstreamDriver
-	if upstreamDriverVal == "" && *upstreamDSN != "" {
-		if detected, ok := detectUpstreamDriver(*upstreamDSN); ok {
+	if upstreamDriverVal == "" && upstreamDSNVal != "" {
+		if detected, ok := detectUpstreamDriver(upstreamDSNVal); ok {
 			upstreamDriverVal = detected
 		} else {
 			log.Fatalf("index: unable to detect upstream driver from dsn")
@@ -202,7 +219,7 @@ func indexCmd(args []string) {
 		BatchSize:      *batchSize,
 		Prune:          *prune,
 		UpstreamDriver: upstreamDriverVal,
-		UpstreamDSN:    *upstreamDSN,
+		UpstreamDSN:    upstreamDSNVal,
 		UpstreamShadow: *upstreamShadow,
 		SyncBatch:      *syncBatch,
 		Logf:           log.Printf,
@@ -224,8 +241,10 @@ func syncCmd(args []string) {
 	maxSize := flags.Int64("max-size", 0, "max file size in bytes")
 	upstreamDriver := flags.String("upstream-driver", "", "upstream sql driver (auto-detect if empty)")
 	upstreamDSN := flags.String("upstream-dsn", "", "upstream dsn (required)")
+	upstreamSecret := flags.String("upstream-secret", "", "upstream secret ref for DSN expansion (optional)")
 	downstreamDriver := flags.String("downstream-driver", "", "downstream sql driver (auto-detect if empty)")
 	downstreamDSN := flags.String("downstream-dsn", "", "downstream dsn (optional)")
+	downstreamSecret := flags.String("downstream-secret", "", "downstream secret ref for DSN expansion (optional)")
 	downstreamApply := flags.Bool("downstream-apply", false, "apply downstream materialized tables (bigquery only)")
 	downstreamReset := flags.Bool("downstream-reset", false, "reset downstream log/state before push (dangerous)")
 	upstreamShadow := flags.String("upstream-shadow", "shadow_vec_docs", "upstream shadow table name")
@@ -287,10 +306,18 @@ func syncCmd(args []string) {
 	defer func() { _ = svc.Close() }()
 
 	logf := syncProgressPrinter(*progress)
-	if *downstreamDSN != "" {
+	downstreamDSNVal := strings.TrimSpace(*downstreamDSN)
+	if strings.TrimSpace(*downstreamSecret) != "" {
+		expanded, err := service.ExpandDSNWithSecret(ctx, downstreamDSNVal, *downstreamSecret)
+		if err != nil {
+			log.Fatalf("sync: downstream secret: %v", err)
+		}
+		downstreamDSNVal = expanded
+	}
+	if downstreamDSNVal != "" {
 		downstreamDriverVal := *downstreamDriver
 		if downstreamDriverVal == "" {
-			if detected, ok := detectUpstreamDriver(*downstreamDSN); ok {
+			if detected, ok := detectUpstreamDriver(downstreamDSNVal); ok {
 				downstreamDriverVal = detected
 			} else {
 				log.Fatalf("sync: unable to detect downstream driver from dsn")
@@ -300,7 +327,7 @@ func syncCmd(args []string) {
 			DBPath:           dbPathVal,
 			Roots:            roots,
 			DownstreamDriver: downstreamDriverVal,
-			DownstreamDSN:    *downstreamDSN,
+			DownstreamDSN:    downstreamDSNVal,
 			DownstreamShadow: *upstreamShadow,
 			SyncBatch:        *syncBatch,
 			ApplyDownstream:  *downstreamApply,
@@ -313,9 +340,17 @@ func syncCmd(args []string) {
 	}
 	ensureSQLiteStore("sync", dbPathVal)
 
+	upstreamDSNVal := strings.TrimSpace(*upstreamDSN)
+	if strings.TrimSpace(*upstreamSecret) != "" {
+		expanded, err := service.ExpandDSNWithSecret(ctx, upstreamDSNVal, *upstreamSecret)
+		if err != nil {
+			log.Fatalf("sync: upstream secret: %v", err)
+		}
+		upstreamDSNVal = expanded
+	}
 	upstreamDriverVal := *upstreamDriver
 	if upstreamDriverVal == "" {
-		if detected, ok := detectUpstreamDriver(*upstreamDSN); ok {
+		if detected, ok := detectUpstreamDriver(upstreamDSNVal); ok {
 			upstreamDriverVal = detected
 		} else {
 			log.Fatalf("sync: unable to detect upstream driver from dsn")
@@ -326,7 +361,7 @@ func syncCmd(args []string) {
 		DBPath:         dbPathVal,
 		Roots:          roots,
 		UpstreamDriver: upstreamDriverVal,
-		UpstreamDSN:    *upstreamDSN,
+		UpstreamDSN:    upstreamDSNVal,
 		UpstreamShadow: *upstreamShadow,
 		SyncBatch:      *syncBatch,
 		Invalidate:     *invalidate,
