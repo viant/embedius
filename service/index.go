@@ -154,6 +154,20 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 				return err
 			}
 		}
+		if resolveDialect(driver) == dialectMySQL {
+			dialect, batchInsert := detectDownstreamDialect(ctx, db, req.Logf)
+			if err := pushShadowLog(ctx, db, db, pushConfig{
+				DatasetID:   spec.Name,
+				ShadowTable: req.UpstreamShadow,
+				DocsTable:   localDocsTable(driver),
+				BatchSize:   req.SyncBatch,
+				Logf:        req.Logf,
+				Dialect:     dialect,
+				BatchInsert: batchInsert,
+			}); err != nil {
+				return err
+			}
+		}
 		if req.Logf != nil {
 			if info, err := rootSummary(ctx, conn, spec.Name, driver); err == nil {
 				logRootSummary(req.Logf, "index done", info)

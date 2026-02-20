@@ -60,7 +60,7 @@ func serveCmd(args []string) {
 		rootSpecs = buildRootSpecs(cfg)
 	}
 
-	cfgStore := resolveStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, false)
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN

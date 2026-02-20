@@ -19,7 +19,7 @@ func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, error) {
 		return nil, fmt.Errorf("--all requires --config or ~/embedius/config.yaml")
 	}
 	if req.ConfigPath != "" {
-		cfg, err := LoadConfig(req.ConfigPath)
+		cfg, err := LoadConfigWithOptions(req.ConfigPath, LoadConfigOptions{SkipSecrets: req.SkipSecrets})
 		if err != nil {
 			return nil, err
 		}

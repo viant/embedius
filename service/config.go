@@ -61,7 +61,15 @@ type MCPServerConfig struct {
 	Port int    `yaml:"port"`
 }
 
+type LoadConfigOptions struct {
+	SkipSecrets bool
+}
+
 func LoadConfig(path string) (*Config, error) {
+	return LoadConfigWithOptions(path, LoadConfigOptions{})
+}
+
+func LoadConfigWithOptions(path string, opts LoadConfigOptions) (*Config, error) {
 	path, err := expandUserPath(path)
 	if err != nil {
 		return nil, err
@@ -93,7 +101,7 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 	}
-	if cfg.Store.Secret != "" {
+	if cfg.Store.Secret != "" && !opts.SkipSecrets {
 		if expanded, err := ExpandDSNWithSecret(context.Background(), cfg.Store.DSN, cfg.Store.Secret); err == nil {
 			cfg.Store.DSN = expanded
 		} else {
@@ -107,7 +115,7 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 	}
-	if cfg.UpstreamStore.Secret != "" {
+	if cfg.UpstreamStore.Secret != "" && !opts.SkipSecrets {
 		if expanded, err := ExpandDSNWithSecret(context.Background(), cfg.UpstreamStore.DSN, cfg.UpstreamStore.Secret); err == nil {
 			cfg.UpstreamStore.DSN = expanded
 		} else {
@@ -126,7 +134,7 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.Roots[name] = root
 	}
 	for i, up := range cfg.Upstreams {
-		if strings.TrimSpace(up.Secret) == "" {
+		if strings.TrimSpace(up.Secret) == "" || opts.SkipSecrets {
 			continue
 		}
 		expanded, err := ExpandDSNWithSecret(context.Background(), up.DSN, up.Secret)

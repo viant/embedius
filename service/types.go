@@ -25,6 +25,7 @@ type ResolveRootsRequest struct {
 	Include      []string
 	Exclude      []string
 	MaxSizeBytes int64
+	SkipSecrets  bool
 }
 
 // IndexRequest defines inputs for indexing.

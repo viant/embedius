@@ -147,7 +147,7 @@ func indexCmd(args []string) {
 		log.Fatalf("resolve roots: %v", err)
 	}
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
-	cfgStore := resolveStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, false)
 	storeDSNVal := strings.TrimSpace(*storeDSN)
 	if storeDSNVal == "" {
 		storeDSNVal = cfgStore.DSN
@@ -283,8 +283,8 @@ func syncCmd(args []string) {
 		log.Fatalf("resolve roots: %v", err)
 	}
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
-	cfgStore := resolveStoreConfig(configPathVal)
-	cfgUpstreamStore := resolveUpstreamStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, false)
+	cfgUpstreamStore := resolveUpstreamStoreConfig(configPathVal, false)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
 	}
@@ -456,7 +456,7 @@ func adminCmd(args []string) {
 		log.Fatalf("resolve roots: %v", err)
 	}
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
-	cfgStore := resolveStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, false)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
 	}
@@ -547,14 +547,15 @@ func searchCmd(args []string) {
 	configPathVal := resolveConfigPath(*configPath)
 	var cfg *service.Config
 	var roots []service.RootSpec
+	resolvedMCP := strings.TrimSpace(*mcpAddr)
 	if configPathVal != "" {
 		var err error
-		cfg, err = service.LoadConfig(configPathVal)
+		cfg, err = service.LoadConfigWithOptions(configPathVal, service.LoadConfigOptions{SkipSecrets: true})
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
+		resolvedMCP = resolveMCPAddrFromConfig(*mcpAddr, cfg)
 	}
-	resolvedMCP := resolveMCPAddrFromConfig(*mcpAddr, cfg)
 	skipResolve := resolvedMCP != "" && (*root == "" || *allRoots)
 	if (configPathVal != "" || *allRoots) && !skipResolve {
 		if configPathVal == "" {
@@ -566,6 +567,7 @@ func searchCmd(args []string) {
 			ConfigPath:  configPathVal,
 			All:         *allRoots,
 			RequirePath: false,
+			SkipSecrets: true,
 		})
 		if err != nil {
 			log.Fatalf("resolve roots: %v", err)
@@ -599,7 +601,7 @@ func searchCmd(args []string) {
 	}
 
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
-	cfgStore := resolveStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, true)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
 	}
@@ -855,7 +857,7 @@ func rootsCmd(args []string) {
 	}
 
 	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
-	cfgStore := resolveStoreConfig(configPathVal)
+	cfgStore := resolveStoreConfig(configPathVal, false)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
 	}
@@ -967,11 +969,11 @@ type storeConfig struct {
 	Driver string
 }
 
-func resolveStoreConfig(configPath string) storeConfig {
+func resolveStoreConfig(configPath string, skipSecrets bool) storeConfig {
 	if configPath == "" {
 		return storeConfig{}
 	}
-	cfg, err := service.LoadConfig(configPath)
+	cfg, err := service.LoadConfigWithOptions(configPath, service.LoadConfigOptions{SkipSecrets: skipSecrets})
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
@@ -985,11 +987,11 @@ func resolveStoreConfig(configPath string) storeConfig {
 	return storeConfig{DSN: dsn, Driver: driver}
 }
 
-func resolveUpstreamStoreConfig(configPath string) storeConfig {
+func resolveUpstreamStoreConfig(configPath string, skipSecrets bool) storeConfig {
 	if configPath == "" {
 		return storeConfig{}
 	}
-	cfg, err := service.LoadConfig(configPath)
+	cfg, err := service.LoadConfigWithOptions(configPath, service.LoadConfigOptions{SkipSecrets: skipSecrets})
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
