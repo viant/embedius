@@ -45,11 +45,16 @@ embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite
 # Index all roots from config
 embedius index --config /path/to/roots.yaml --all
 
-# Force --db even when config has db:
-embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite --db-force
+# --db overrides config store.dsn:
+embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite
 
 # roots.yaml (or default ~/embedius/config.yaml if present)
-# db: /tmp/vec.sqlite
+# store:
+#   driver: sqlite
+#   dsn: /tmp/vec.sqlite
+# upstreamStore:
+#   driver: postgres
+#   dsn: postgres://user:pass@host:5432/db?sslmode=disable
 # roots:
 #   abc:
 #     path: /abs/path/to/abc
@@ -108,8 +113,8 @@ embedius sync --root abc --db /tmp/vec.sqlite \\
 
 Note: sync filters apply only to insert/update; deletes are always applied.
 
-# Force --db even when config has db:
-embedius sync --config /path/to/roots.yaml --all --db /tmp/vec.sqlite --db-force \\
+# --db overrides config store.dsn:
+embedius sync --config /path/to/roots.yaml --all --db /tmp/vec.sqlite \\
   --upstream-driver mysql --upstream-dsn 'user:pass@tcp(host:3306)/db'
 
 # Admin tasks
@@ -151,7 +156,12 @@ Embedius looks for `~/embedius/config.yaml` by default if `--config` is not prov
 Example:
 
 ```yaml
-db: /tmp/vec.sqlite
+store:
+  driver: sqlite
+  dsn: /tmp/vec.sqlite
+upstreamStore:
+  driver: mysql
+  dsn: user:pass@tcp(host:3306)/db
 roots:
   etl:
     path: /abs/path/to/etl

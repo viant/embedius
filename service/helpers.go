@@ -342,7 +342,6 @@ func ensureSchema(ctx context.Context, q sqlQueryer, driver string) error {
 			"index" BLOB,
 			PRIMARY KEY (shadow_table_name, dataset_id)
 		);`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS emb_docs USING vec(doc_id);`,
 	}
 	for _, stmt := range stmts {
 		if _, err := q.ExecContext(ctx, stmt); err != nil {
@@ -351,6 +350,9 @@ func ensureSchema(ctx context.Context, q sqlQueryer, driver string) error {
 			}
 			return err
 		}
+	}
+	if err := ensureEmbDocsVTab(ctx, q); err != nil {
+		return err
 	}
 	return nil
 }
@@ -398,6 +400,69 @@ max_size_bytes=excluded.max_size_bytes,
 updated_at=CURRENT_TIMESTAMP`, datasetID, includeGlobs, excludeGlobs, maxSizeBytes)
 		return err
 	}
+}
+
+func dbPathClause(ctx context.Context, q sqlQueryer) string {
+	path := resolveDBPathFromQueryer(ctx, q)
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return ", dbpath=" + sqliteQuote(path)
+}
+
+func resolveDBPathFromQueryer(ctx context.Context, q sqlQueryer) string {
+	rows, err := q.QueryContext(ctx, `SELECT name, file FROM pragma_database_list`)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, file string
+		if err := rows.Scan(&name, &file); err != nil {
+			return ""
+		}
+		if name == "main" && strings.TrimSpace(file) != "" {
+			return file
+		}
+	}
+	return ""
+}
+
+func sqliteQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func ensureEmbDocsVTab(ctx context.Context, q sqlQueryer) error {
+	var sqlText string
+	row := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE name='emb_docs' AND type='table'`)
+	err := row.Scan(&sqlText)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return createEmbDocsVTab(ctx, q)
+		}
+		return err
+	}
+	if sqlText == "" || !strings.Contains(strings.ToLower(sqlText), "dbpath") {
+		if _, err := q.ExecContext(ctx, `DROP TABLE IF EXISTS emb_docs`); err != nil {
+			if strings.Contains(err.Error(), "no such module: vec") {
+				return nil
+			}
+			return err
+		}
+		return createEmbDocsVTab(ctx, q)
+	}
+	return nil
+}
+
+func createEmbDocsVTab(ctx context.Context, q sqlQueryer) error {
+	stmt := `CREATE VIRTUAL TABLE IF NOT EXISTS emb_docs USING vec(doc_id` + dbPathClause(ctx, q) + `);`
+	if _, err := q.ExecContext(ctx, stmt); err != nil {
+		if strings.Contains(err.Error(), "no such module: vec") && strings.Contains(stmt, "VIRTUAL TABLE") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func encodeGlobList(globs []string) string {
@@ -716,7 +781,7 @@ WHERE a.dataset_id = ? AND d.id IS NULL`, docsTable), datasetID).Scan(&stats.Orp
 	return &stats, nil
 }
 
-func fallbackSearch(ctx context.Context, q sqlQueryer, dataset string, qvec []float32, minScore float64, limit int) ([]SearchResult, error) {
+func fallbackSearch(ctx context.Context, q sqlQueryer, dataset string, qvec []float32, minScore float64, limit int, offset int) ([]SearchResult, error) {
 	rows, err := q.QueryContext(ctx, `SELECT id, content, meta, embedding FROM _vec_emb_docs WHERE dataset_id = ? AND archived = 0`, dataset)
 	if err != nil {
 		return nil, err
@@ -749,6 +814,13 @@ func fallbackSearch(ctx context.Context, q sqlQueryer, dataset string, qvec []fl
 		return nil, err
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(hits) {
+		return nil, nil
+	}
+	hits = hits[offset:]
 	if limit > 0 && len(hits) > limit {
 		hits = hits[:limit]
 	}

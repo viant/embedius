@@ -510,7 +510,7 @@ func (s *Store) SimilaritySearch(ctx context.Context, query string, k int, opts 
 	if err != nil {
 		return nil, err
 	}
-	return s.queryOnce(ctx, dataset, blob, k)
+	return s.queryOnce(ctx, dataset, blob, k, options.Offset)
 }
 
 func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int, options vectorstores.Options) ([]schema.Document, error) {
@@ -534,6 +534,9 @@ func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int
 		dataset = defaultNamespace
 	}
 	candK := k
+	if options.Offset > 0 {
+		candK += options.Offset
+	}
 	if candK < 32 {
 		candK = k * 2
 	}
@@ -553,7 +556,7 @@ func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int
 		if err != nil {
 			return nil, err
 		}
-		docs, err := s.queryOnce(ctx, dataset, blob, candK)
+		docs, err := s.queryOnce(ctx, dataset, blob, candK, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -588,6 +591,14 @@ func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int
 		pairs = append(pairs, pair{doc: d, score: sc})
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].score > pairs[j].score })
+	offset := options.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(pairs) {
+		return nil, nil
+	}
+	pairs = pairs[offset:]
 	if len(pairs) > k {
 		pairs = pairs[:k]
 	}
@@ -613,7 +624,10 @@ func embeddingContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return base, func() {}
 }
 
-func (s *Store) queryOnce(ctx context.Context, dataset string, blob []byte, k int) ([]schema.Document, error) {
+func (s *Store) queryOnce(ctx context.Context, dataset string, blob []byte, k int, offset int) ([]schema.Document, error) {
+	if offset < 0 {
+		offset = 0
+	}
 	query := fmt.Sprintf(`SELECT d.id, d.content, d.meta, v.match_score
 FROM %s v
 JOIN %s d ON d.dataset_id = v.dataset_id AND d.id = v.doc_id
@@ -621,13 +635,13 @@ WHERE v.dataset_id = ?
   AND v.doc_id MATCH ?
   AND d.archived = 0
 ORDER BY v.match_score DESC
-LIMIT ?`, s.vtable, s.shadow)
+LIMIT ? OFFSET ?`, s.vtable, s.shadow)
 
-	rows, err := s.db.QueryContext(ctx, query, dataset, blob, k)
+	rows, err := s.db.QueryContext(ctx, query, dataset, blob, k, offset)
 	if err != nil {
 		if isMatchUnavailable(err) {
 			fmt.Printf("sqlitevec: MATCH unavailable, falling back to brute-force search (performance may degrade): %v\n", err)
-			return s.fallbackSearch(ctx, dataset, blob, k)
+			return s.fallbackSearch(ctx, dataset, blob, k, offset)
 		}
 		return nil, err
 	}
@@ -657,7 +671,7 @@ LIMIT ?`, s.vtable, s.shadow)
 	return docs, nil
 }
 
-func (s *Store) fallbackSearch(ctx context.Context, dataset string, blob []byte, k int) ([]schema.Document, error) {
+func (s *Store) fallbackSearch(ctx context.Context, dataset string, blob []byte, k int, offset int) ([]schema.Document, error) {
 	qvec, err := vector.DecodeEmbedding(blob)
 	if err != nil {
 		return nil, err
@@ -700,6 +714,13 @@ func (s *Store) fallbackSearch(ctx context.Context, dataset string, blob []byte,
 		return nil, err
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(hits) {
+		return nil, nil
+	}
+	hits = hits[offset:]
 	if k > 0 && len(hits) > k {
 		hits = hits[:k]
 	}
@@ -774,6 +795,7 @@ func (s *Store) Remove(ctx context.Context, id string, opts ...vectorstores.Opti
 }
 
 func (s *Store) ensureSchemaDDL(ctx context.Context) error {
+	vtabStmt := fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec(doc_id%s);`, s.vtable, s.dbPathClause(ctx))
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS vec_dataset (
 			dataset_id   TEXT PRIMARY KEY,
@@ -845,7 +867,7 @@ func (s *Store) ensureSchemaDDL(ctx context.Context) error {
 			archived         INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (dataset_id, id)
 		);`, s.shadow),
-		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec(doc_id);`, s.vtable),
+		vtabStmt,
 		`CREATE INDEX IF NOT EXISTS idx_emb_asset_path ON emb_asset(dataset_id, path);`,
 		`CREATE INDEX IF NOT EXISTS idx_emb_asset_mod ON emb_asset(dataset_id, mod_time);`,
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_asset ON %s(dataset_id, asset_id);`, s.vtable, s.shadow),
@@ -858,6 +880,39 @@ func (s *Store) ensureSchemaDDL(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) dbPathClause(ctx context.Context) string {
+	path := resolveDBPath(ctx, s.db)
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return fmt.Sprintf(", dbpath=%s", sqliteQuote(path))
+}
+
+func sqliteQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func resolveDBPath(ctx context.Context, db *sql.DB) string {
+	if db == nil {
+		return ""
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name, file FROM pragma_database_list`)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, file string
+		if err := rows.Scan(&name, &file); err != nil {
+			return ""
+		}
+		if name == "main" && strings.TrimSpace(file) != "" {
+			return file
+		}
+	}
+	return ""
 }
 
 func (s *Store) verifySchema(ctx context.Context) error {

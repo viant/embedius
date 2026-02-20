@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func indexCmd(args []string) {
 	storeDSN := flags.String("store-dsn", "", "store dsn for indexing (optional, sqlite only)")
 	storeDriver := flags.String("store-driver", "", "store driver (optional, auto-detect if empty)")
 	storeSecret := flags.String("store-secret", "", "store secret ref for DSN expansion (optional)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbForce := false
 	root := flags.String("root", "", "root/dataset name (required)")
 	rootPath := flags.String("path", "", "filesystem path to index (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
@@ -127,7 +128,7 @@ func indexCmd(args []string) {
 	maybeDebugSleep("index", *debugSleep)
 
 	configPathVal := resolveConfigPath(*configPath)
-	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
+	roots, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:         *root,
 		RootPath:     *rootPath,
 		ConfigPath:   configPathVal,
@@ -140,7 +141,7 @@ func indexCmd(args []string) {
 	if err != nil {
 		log.Fatalf("resolve roots: %v", err)
 	}
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	cfgStore := resolveStoreConfig(configPathVal)
 	storeDSNVal := strings.TrimSpace(*storeDSN)
 	if storeDSNVal == "" {
@@ -166,7 +167,7 @@ func indexCmd(args []string) {
 			}
 		}
 	}
-	if storeDSNVal != "" {
+	if storeDSNVal != "" && dbPathVal == "" {
 		dbPathVal = storeDSNVal
 	}
 	if dbPathVal == "" {
@@ -232,7 +233,7 @@ func indexCmd(args []string) {
 func syncCmd(args []string) {
 	flags := flag.NewFlagSet("sync", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbForce := false
 	root := flags.String("root", "", "root/dataset name (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	allRoots := flags.Bool("all", false, "sync all roots in config (uses --config or ~/embedius/config.yaml)")
@@ -240,7 +241,7 @@ func syncCmd(args []string) {
 	exclude := flags.String("exclude", "", "comma-separated exclude patterns")
 	maxSize := flags.Int64("max-size", 0, "max file size in bytes")
 	upstreamDriver := flags.String("upstream-driver", "", "upstream sql driver (auto-detect if empty)")
-	upstreamDSN := flags.String("upstream-dsn", "", "upstream dsn (required)")
+	upstreamDSN := flags.String("upstream-dsn", "", "upstream dsn (optional if config has upstreamStore)")
 	upstreamSecret := flags.String("upstream-secret", "", "upstream secret ref for DSN expansion (optional)")
 	downstreamDriver := flags.String("downstream-driver", "", "downstream sql driver (auto-detect if empty)")
 	downstreamDSN := flags.String("downstream-dsn", "", "downstream dsn (optional)")
@@ -255,10 +256,6 @@ func syncCmd(args []string) {
 	debugSleep := flags.Int("debug-sleep", 0, "debug: sleep N seconds before execution (for gops)")
 	flags.Parse(args)
 
-	if *upstreamDSN == "" && *downstreamDSN == "" {
-		flags.Usage()
-		os.Exit(2)
-	}
 	if *upstreamDSN != "" && *downstreamDSN != "" {
 		log.Fatalf("sync: use either --upstream-dsn or --downstream-dsn, not both")
 	}
@@ -268,7 +265,7 @@ func syncCmd(args []string) {
 	maybeDebugSleep("sync", *debugSleep)
 
 	configPathVal := resolveConfigPath(*configPath)
-	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
+	roots, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:         *root,
 		ConfigPath:   configPathVal,
 		All:          *allRoots,
@@ -280,8 +277,9 @@ func syncCmd(args []string) {
 	if err != nil {
 		log.Fatalf("resolve roots: %v", err)
 	}
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	cfgStore := resolveStoreConfig(configPathVal)
+	cfgUpstreamStore := resolveUpstreamStoreConfig(configPathVal)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
 	}
@@ -341,6 +339,9 @@ func syncCmd(args []string) {
 	ensureSQLiteStore("sync", dbPathVal)
 
 	upstreamDSNVal := strings.TrimSpace(*upstreamDSN)
+	if upstreamDSNVal == "" && cfgUpstreamStore.DSN != "" {
+		upstreamDSNVal = cfgUpstreamStore.DSN
+	}
 	if strings.TrimSpace(*upstreamSecret) != "" {
 		expanded, err := service.ExpandDSNWithSecret(ctx, upstreamDSNVal, *upstreamSecret)
 		if err != nil {
@@ -349,12 +350,19 @@ func syncCmd(args []string) {
 		upstreamDSNVal = expanded
 	}
 	upstreamDriverVal := *upstreamDriver
+	if upstreamDriverVal == "" && cfgUpstreamStore.Driver != "" {
+		upstreamDriverVal = cfgUpstreamStore.Driver
+	}
 	if upstreamDriverVal == "" {
 		if detected, ok := detectUpstreamDriver(upstreamDSNVal); ok {
 			upstreamDriverVal = detected
 		} else {
 			log.Fatalf("sync: unable to detect upstream driver from dsn")
 		}
+	}
+	if upstreamDSNVal == "" {
+		flags.Usage()
+		os.Exit(2)
 	}
 
 	if err := svc.Sync(ctx, service.SyncRequest{
@@ -416,7 +424,7 @@ func syncProgressPrinter(enabled bool) func(format string, args ...any) {
 func adminCmd(args []string) {
 	flags := flag.NewFlagSet("admin", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbForce := false
 	root := flags.String("root", "", "root/dataset name (required)")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	allRoots := flags.Bool("all", false, "apply to all roots in config (uses --config or ~/embedius/config.yaml)")
@@ -433,7 +441,7 @@ func adminCmd(args []string) {
 	maybeDebugSleep("admin", *debugSleep)
 
 	configPathVal := resolveConfigPath(*configPath)
-	roots, cfgDB, err := service.ResolveRoots(service.ResolveRootsRequest{
+	roots, err := service.ResolveRoots(service.ResolveRootsRequest{
 		Root:        *root,
 		ConfigPath:  configPathVal,
 		All:         *allRoots,
@@ -442,7 +450,7 @@ func adminCmd(args []string) {
 	if err != nil {
 		log.Fatalf("resolve roots: %v", err)
 	}
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	cfgStore := resolveStoreConfig(configPathVal)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
@@ -498,7 +506,7 @@ func adminCmd(args []string) {
 func searchCmd(args []string) {
 	flags := flag.NewFlagSet("search", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbForce := false
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote search")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (required unless --all)")
@@ -534,14 +542,12 @@ func searchCmd(args []string) {
 	configPathVal := resolveConfigPath(*configPath)
 	var cfg *service.Config
 	var roots []service.RootSpec
-	var cfgDB string
 	if configPathVal != "" {
 		var err error
 		cfg, err = service.LoadConfig(configPathVal)
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		cfgDB = cfg.DB
 	}
 	resolvedMCP := resolveMCPAddrFromConfig(*mcpAddr, cfg)
 	skipResolve := resolvedMCP != "" && (*root == "" || *allRoots)
@@ -550,7 +556,7 @@ func searchCmd(args []string) {
 			log.Fatalf("search: --all requires --config or ~/embedius/config.yaml")
 		}
 		var err error
-		roots, cfgDB, err = service.ResolveRoots(service.ResolveRootsRequest{
+		roots, err = service.ResolveRoots(service.ResolveRootsRequest{
 			Root:        *root,
 			ConfigPath:  configPathVal,
 			All:         *allRoots,
@@ -587,7 +593,7 @@ func searchCmd(args []string) {
 		return
 	}
 
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	cfgStore := resolveStoreConfig(configPathVal)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
@@ -699,6 +705,11 @@ func searchCmd(args []string) {
 		for res := range results {
 			outcomes[res.root] = res
 		}
+		type scoredItem struct {
+			root string
+			item service.SearchResult
+		}
+		merged := make([]scoredItem, 0, len(roots)**limit)
 		for _, r := range roots {
 			res := outcomes[r.Name]
 			if res.err != nil {
@@ -706,12 +717,21 @@ func searchCmd(args []string) {
 				continue
 			}
 			for _, item := range res.results {
-				out := item.Content
-				if len(out) > 200 {
-					out = out[:200] + "..."
-				}
-				fmt.Printf("root=%s id=%s score=%.4f distance=%.4f path=%s\n%s\n\n", r.Name, item.ID, item.Score, 1-item.Score, item.Path, out)
+				merged = append(merged, scoredItem{root: r.Name, item: item})
 			}
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			if merged[i].item.Score == merged[j].item.Score {
+				return merged[i].item.ID < merged[j].item.ID
+			}
+			return merged[i].item.Score > merged[j].item.Score
+		})
+		for _, entry := range merged {
+			out := entry.item.Content
+			if len(out) > 200 {
+				out = out[:200] + "..."
+			}
+			fmt.Printf("root=%s id=%s score=%.4f distance=%.4f path=%s\n%s\n\n", entry.root, entry.item.ID, entry.item.Score, 1-entry.item.Score, entry.item.Path, out)
 		}
 		return
 	}
@@ -767,7 +787,7 @@ func printSearchResults(results []service.SearchResult, showMeta bool) {
 func rootsCmd(args []string) {
 	flags := flag.NewFlagSet("roots", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (optional with config or default config db)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbForce := false
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (host:port or URL) for remote roots")
 	configPath := flags.String("config", "", "config yaml with roots (optional, defaults to ~/embedius/config.yaml if present)")
 	root := flags.String("root", "", "root/dataset name (optional)")
@@ -775,7 +795,6 @@ func rootsCmd(args []string) {
 	flags.Parse(args)
 
 	var cfg *service.Config
-	var cfgDB string
 	configPathVal := resolveConfigPath(*configPath)
 	if configPathVal != "" {
 		var err error
@@ -783,7 +802,6 @@ func rootsCmd(args []string) {
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		cfgDB = cfg.DB
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -831,7 +849,7 @@ func rootsCmd(args []string) {
 		return
 	}
 
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
 	cfgStore := resolveStoreConfig(configPathVal)
 	if dbPathVal == "" && cfgStore.DSN != "" {
 		dbPathVal = cfgStore.DSN
@@ -954,6 +972,24 @@ func resolveStoreConfig(configPath string) storeConfig {
 	}
 	dsn := strings.TrimSpace(cfg.Store.DSN)
 	driver := strings.TrimSpace(cfg.Store.Driver)
+	if driver == "" && dsn != "" {
+		if detected, ok := detectUpstreamDriver(dsn); ok {
+			driver = detected
+		}
+	}
+	return storeConfig{DSN: dsn, Driver: driver}
+}
+
+func resolveUpstreamStoreConfig(configPath string) storeConfig {
+	if configPath == "" {
+		return storeConfig{}
+	}
+	cfg, err := service.LoadConfig(configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	dsn := strings.TrimSpace(cfg.UpstreamStore.DSN)
+	driver := strings.TrimSpace(cfg.UpstreamStore.Driver)
 	if driver == "" && dsn != "" {
 		if detected, ok := detectUpstreamDriver(dsn); ok {
 			driver = detected

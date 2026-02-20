@@ -64,7 +64,6 @@ func (s *Set) ensureEmbedder(opts []vectorstores.Option) []vectorstores.Option {
 func (s *Set) Index(ctx context.Context, URI string) error {
 	start := time.Now()
 	syncRequested := upstreamSyncConfig(ctx) != nil
-	fmt.Printf("embedius: index start location=%q namespace=%q sync=%t\n", URI, s.namespace, syncRequested)
 	ctx = fs.WithIndexRoot(ctx, URI)
 	if cfg := upstreamSyncConfig(ctx); cfg != nil {
 		if syncer, ok := s.vectorDb.(vectordb.UpstreamSyncer); ok {
@@ -97,12 +96,10 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 	}
 	toAddDocuments, toRemove, err := s.indexer.Index(ctx, URI, s.cache)
 	if err != nil {
-		fmt.Printf("embedius: index error location=%q err=%v\n", URI, err)
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
 	if len(toAddDocuments) == 0 && len(toRemove) == 0 {
-		fmt.Printf("embedius: index no-op location=%q duration=%s sync=%t\n", URI, time.Since(start), syncRequested)
 		return nil // Nothing changed
 	}
 
@@ -151,9 +148,7 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 						filtered = append(filtered, doc)
 					}
 					toAddDocuments = filtered
-					if skipped > 0 {
-						fmt.Printf("embedius: index skip location=%q md5_existing=%d\n", URI, skipped)
-					}
+					_ = skipped
 					if len(toRemove) > 0 {
 						skipIDs := map[string]bool{}
 						for docID := range skipDocs {
@@ -204,7 +199,7 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 		}
 	}
 
-	fmt.Printf("embedius: index done location=%q added=%d removed=%d\n", URI, len(toAddDocuments), len(toRemove))
+	_, _, _ = start, syncRequested, URI
 	return s.Persist(ctx)
 }
 
@@ -229,7 +224,6 @@ func (s *Set) updateEntriesWithIDs(documents []schema.Document, ids []string) er
 		metadata := doc.Metadata
 		docID, ok := metadata[meta.DocumentID].(string)
 		if !ok {
-			fmt.Printf(meta.DocumentID+" not found in metadata for document %+v\n", metadata)
 			continue
 		}
 
@@ -242,7 +236,6 @@ func (s *Set) updateEntriesWithIDs(documents []schema.Document, ids []string) er
 		if len(entry.Fragments) > 1 { //more than one fragment use fragmentID
 			fragmentID, ok := metadata[meta.FragmentID].(string)
 			if !ok {
-				fmt.Printf(meta.FragmentID+" not found in metadata for document %+v\n", metadata)
 				continue
 			}
 

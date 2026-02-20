@@ -129,6 +129,10 @@ func (h *Handler) search(ctx context.Context, in *SearchInput) (*SearchOutput, e
 	if limit <= 0 {
 		limit = 10
 	}
+	offset := in.Offset
+	if offset < 0 {
+		offset = 0
+	}
 	model := h.model
 	if in.Model != "" {
 		model = in.Model
@@ -144,6 +148,7 @@ func (h *Handler) search(ctx context.Context, in *SearchInput) (*SearchOutput, e
 		Embedder: h.embedder,
 		Model:    model,
 		Limit:    limit,
+		Offset:   offset,
 		MinScore: in.MinScore,
 	}, qvec)
 	if err != nil {

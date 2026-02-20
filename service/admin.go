@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -33,7 +34,7 @@ func (s *Service) Admin(ctx context.Context, req AdminRequest) ([]AdminResult, e
 		return nil, fmt.Errorf("admin: action %q requires sqlite store", req.Action)
 	}
 	if s.driver == "sqlite" {
-		if _, err := conn.ExecContext(ctx, `CREATE VIRTUAL TABLE IF NOT EXISTS vec_admin USING vec_admin(op)`); err != nil {
+		if err := ensureVecAdminVTab(ctx, conn); err != nil {
 			return nil, err
 		}
 	}
@@ -95,4 +96,37 @@ func (s *Service) Admin(ctx context.Context, req AdminRequest) ([]AdminResult, e
 		}
 	}
 	return results, nil
+}
+
+func ensureVecAdminVTab(ctx context.Context, conn *sql.Conn) error {
+	var sqlText string
+	row := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE name='vec_admin' AND type='table'`)
+	err := row.Scan(&sqlText)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return createVecAdminVTab(ctx, conn)
+		}
+		return err
+	}
+	if sqlText == "" || !strings.Contains(strings.ToLower(sqlText), "dbpath") {
+		if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS vec_admin`); err != nil {
+			if strings.Contains(err.Error(), "no such module: vec_admin") {
+				return nil
+			}
+			return err
+		}
+		return createVecAdminVTab(ctx, conn)
+	}
+	return nil
+}
+
+func createVecAdminVTab(ctx context.Context, conn *sql.Conn) error {
+	stmt := `CREATE VIRTUAL TABLE IF NOT EXISTS vec_admin USING vec_admin(op` + dbPathClause(ctx, conn) + `)`
+	if _, err := conn.ExecContext(ctx, stmt); err != nil {
+		if strings.Contains(err.Error(), "no such module: vec_admin") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

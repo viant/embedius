@@ -13,11 +13,11 @@ import (
 
 // Config defines root mappings for batch operations.
 type Config struct {
-	DB        string                `yaml:"db"`
-	Store     StoreConfig           `yaml:"store"`
-	Roots     map[string]RootConfig `yaml:"roots"`
-	Upstreams []UpstreamConfig      `yaml:"upstreams"`
-	MCPServer MCPServerConfig       `yaml:"mcpServer"`
+	Store         StoreConfig           `yaml:"store"`
+	UpstreamStore StoreConfig           `yaml:"upstreamStore"`
+	Roots         map[string]RootConfig `yaml:"roots"`
+	Upstreams     []UpstreamConfig      `yaml:"upstreams"`
+	MCPServer     MCPServerConfig       `yaml:"mcpServer"`
 }
 
 // StoreConfig defines vector store settings.
@@ -71,22 +71,13 @@ func LoadConfig(path string) (*Config, error) {
 	// Backward compatible: roots as map[string]string.
 	if len(cfg.Roots) == 0 {
 		var raw struct {
-			DB    string            `yaml:"db"`
 			Roots map[string]string `yaml:"roots"`
 		}
 		if err := yaml.Unmarshal(b, &raw); err == nil && len(raw.Roots) > 0 {
-			cfg.DB = raw.DB
 			cfg.Roots = map[string]RootConfig{}
 			for name, p := range raw.Roots {
 				cfg.Roots[name] = RootConfig{Path: p}
 			}
-		}
-	}
-	if cfg.DB != "" {
-		if expanded, err := expandUserPath(cfg.DB); err == nil {
-			cfg.DB = expanded
-		} else {
-			return nil, err
 		}
 	}
 	if cfg.Store.DSN != "" {
@@ -99,6 +90,20 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Store.Secret != "" {
 		if expanded, err := ExpandDSNWithSecret(context.Background(), cfg.Store.DSN, cfg.Store.Secret); err == nil {
 			cfg.Store.DSN = expanded
+		} else {
+			return nil, err
+		}
+	}
+	if cfg.UpstreamStore.DSN != "" {
+		if expanded, err := expandStoreDSN(cfg.UpstreamStore.DSN, cfg.UpstreamStore.Driver); err == nil {
+			cfg.UpstreamStore.DSN = expanded
+		} else {
+			return nil, err
+		}
+	}
+	if cfg.UpstreamStore.Secret != "" {
+		if expanded, err := ExpandDSNWithSecret(context.Background(), cfg.UpstreamStore.DSN, cfg.UpstreamStore.Secret); err == nil {
+			cfg.UpstreamStore.DSN = expanded
 		} else {
 			return nil, err
 		}
@@ -129,20 +134,57 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func expandUserPath(path string) (string, error) {
-	if path == "" || path[0] != '~' {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
 		return path, nil
-	}
-	if path != "~" && !strings.HasPrefix(path, "~/") {
-		return "", fmt.Errorf("config: unsupported ~user path: %s", path)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	if path == "~" {
+	// Direct ~/path use
+	if strings.HasPrefix(trimmed, "~/") || trimmed == "~" {
+		return filepath.Join(home, strings.TrimPrefix(trimmed, "~")), nil
+	}
+	// file: URI forms
+	if strings.HasPrefix(trimmed, "file:") {
+		prefix := "file://localhost"
+		rest := strings.TrimPrefix(trimmed, prefix)
+		if rest == trimmed {
+			prefix = "file://"
+			rest = strings.TrimPrefix(trimmed, prefix)
+		}
+		if rest == trimmed {
+			prefix = "file:"
+			rest = strings.TrimPrefix(trimmed, prefix)
+		}
+		if rest == "" {
+			return path, nil
+		}
+		rest = strings.TrimLeft(rest, "/")
+		if strings.HasPrefix(rest, "~") {
+			rel := strings.TrimPrefix(rest, "~")
+			abs := filepath.Join(home, rel)
+			absSlash := filepath.ToSlash(abs)
+			if prefix == "file:" {
+				if !strings.HasPrefix(absSlash, "/") {
+					absSlash = "/" + absSlash
+				}
+				return prefix + absSlash, nil
+			}
+			return prefix + "/" + strings.TrimLeft(absSlash, "/"), nil
+		}
+	}
+	if trimmed[0] != '~' {
+		return path, nil
+	}
+	if trimmed != "~" && !strings.HasPrefix(trimmed, "~/") {
+		return "", fmt.Errorf("config: unsupported ~user path: %s", path)
+	}
+	if trimmed == "~" {
 		return home, nil
 	}
-	return filepath.Join(home, path[2:]), nil
+	return filepath.Join(home, trimmed[2:]), nil
 }
 
 func expandStoreDSN(dsn, driver string) (string, error) {

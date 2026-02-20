@@ -13,15 +13,15 @@ func ParseCSV(s string) []string {
 	return splitCSV(s)
 }
 
-// ResolveRoots resolves root specs and optional config DB.
-func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, string, error) {
+// ResolveRoots resolves root specs.
+func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, error) {
 	if req.All && req.ConfigPath == "" {
-		return nil, "", fmt.Errorf("--all requires --config or ~/embedius/config.yaml")
+		return nil, fmt.Errorf("--all requires --config or ~/embedius/config.yaml")
 	}
 	if req.ConfigPath != "" {
 		cfg, err := LoadConfig(req.ConfigPath)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		var out []RootSpec
 		if req.All {
@@ -33,24 +33,24 @@ func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, string, error) {
 			}
 			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 			if len(out) == 0 {
-				return nil, "", fmt.Errorf("config has no roots")
+				return nil, fmt.Errorf("config has no roots")
 			}
-			return out, cfg.DB, nil
+			return out, nil
 		}
 		if req.Root == "" {
-			return nil, "", fmt.Errorf("root is required without --all")
+			return nil, fmt.Errorf("root is required without --all")
 		}
 		p, ok := cfg.Roots[req.Root]
 		if !ok || strings.TrimSpace(p.Path) == "" {
-			return nil, "", fmt.Errorf("root %q not found in config", req.Root)
+			return nil, fmt.Errorf("root %q not found in config", req.Root)
 		}
-		return []RootSpec{{Name: req.Root, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes}}, cfg.DB, nil
+		return []RootSpec{{Name: req.Root, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes}}, nil
 	}
 	if req.Root == "" {
-		return nil, "", fmt.Errorf("root is required")
+		return nil, fmt.Errorf("root is required")
 	}
 	if req.RequirePath && strings.TrimSpace(req.RootPath) == "" {
-		return nil, "", fmt.Errorf("path is required")
+		return nil, fmt.Errorf("path is required")
 	}
 	spec := RootSpec{Name: req.Root, Path: req.RootPath}
 	if len(req.Include) > 0 {
@@ -62,7 +62,7 @@ func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, string, error) {
 	if req.MaxSizeBytes > 0 {
 		spec.MaxSizeBytes = req.MaxSizeBytes
 	}
-	return []RootSpec{spec}, "", nil
+	return []RootSpec{spec}, nil
 }
 
 // Roots returns summary metadata for roots.

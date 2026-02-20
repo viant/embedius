@@ -21,8 +21,8 @@ import (
 
 func serveCmd(args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
-	dbPath := flags.String("db", "", "SQLite database path (required unless config has db)")
-	dbForce := flags.Bool("db-force", false, "force --db even when config has db")
+	dbPath := flags.String("db", "", "SQLite database path (required unless config has store.dsn)")
+	dbForce := false
 	configPath := flags.String("config", "", "config yaml (optional, defaults to ~/embedius/config.yaml if present)")
 	mcpAddr := flags.String("mcp-addr", "", "MCP server address (default from config or 127.0.0.1:6061)")
 	model := flags.String("model", "text-embedding-3-small", "embedding model")
@@ -42,7 +42,6 @@ func serveCmd(args []string) {
 
 	configPathVal := resolveConfigPath(*configPath)
 	var cfg *service.Config
-	var cfgDB string
 	var rootSpecs map[string]service.RootSpec
 	if configPathVal != "" {
 		var err error
@@ -50,11 +49,14 @@ func serveCmd(args []string) {
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		cfgDB = cfg.DB
 		rootSpecs = buildRootSpecs(cfg)
 	}
 
-	dbPathVal := resolveDBPath(*dbPath, cfgDB, *dbForce, "")
+	cfgStore := resolveStoreConfig(configPathVal)
+	dbPathVal := resolveDBPath(*dbPath, "", dbForce, "")
+	if dbPathVal == "" && cfgStore.DSN != "" {
+		dbPathVal = cfgStore.DSN
+	}
 	if dbPathVal == "" {
 		flags.Usage()
 		os.Exit(2)

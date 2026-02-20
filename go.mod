@@ -13,6 +13,7 @@ require (
 	github.com/viant/jsonrpc v0.17.0
 	github.com/viant/mcp v0.10.0
 	github.com/viant/mcp-protocol v0.10.0
+	github.com/viant/scy v0.25.3
 	github.com/viant/sqlx v0.22.0
 	github.com/xuri/excelize/v2 v2.10.0
 	golang.org/x/sys v0.37.0
@@ -53,7 +54,6 @@ require (
 	github.com/tiendc/go-deepcopy v1.7.1 // indirect
 	github.com/viant/gosh v0.2.4 // indirect
 	github.com/viant/parsly v0.3.3 // indirect
-	github.com/viant/scy v0.25.3 // indirect
 	github.com/viant/structology v0.8.0 // indirect
 	github.com/viant/tagly v0.3.0 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
@@ -80,7 +80,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/viant/sqlite-vec v0.2.0
+	github.com/viant/sqlite-vec v0.3.0
 	github.com/viant/toolbox v0.37.1-0.20241210210120-32350b063cf8 // indirect
 	github.com/viant/vec v0.2.4-0.20250819200643-7e16b6ea443c // indirect
 	github.com/viant/xreflect v0.7.3 // indirect

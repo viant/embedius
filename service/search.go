@@ -21,6 +21,9 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) ([]SearchResult
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
 	emb, err := s.resolveEmbedder(req.Embedder)
 	if err != nil {
 		return nil, err
@@ -49,6 +52,9 @@ func (s *Service) SearchWithConn(ctx context.Context, conn *sql.Conn, req Search
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
 	emb, err := s.resolveEmbedder(req.Embedder)
 	if err != nil {
 		return nil, err
@@ -76,6 +82,9 @@ func (s *Service) SearchWithEmbedding(ctx context.Context, req SearchRequest, qv
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
 	if len(qvec) == 0 {
 		return nil, fmt.Errorf("query embedding is required")
 	}
@@ -99,6 +108,9 @@ func (s *Service) SearchWithConnAndEmbedding(ctx context.Context, conn *sql.Conn
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
 	if len(qvec) == 0 {
 		return nil, fmt.Errorf("query embedding is required")
 	}
@@ -119,7 +131,7 @@ WHERE v.dataset_id = ?
   AND d.archived = 0
   AND v.match_score >= ?
 ORDER BY v.match_score DESC
-LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
+LIMIT ? OFFSET ?`, req.Dataset, blob, req.MinScore, req.Limit, req.Offset)
 	if err != nil {
 		if db != nil && strings.Contains(err.Error(), "no such module: vec") {
 			if rows, err := s.matchWithFreshDB(ctx, req, blob); err == nil {
@@ -129,8 +141,7 @@ LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
 		if err != nil && (strings.Contains(err.Error(), "no such module: vec") ||
 			strings.Contains(err.Error(), "no such table: emb_docs") ||
 			strings.Contains(err.Error(), "unable to use function MATCH")) {
-			fmt.Printf("embedius: MATCH unavailable, falling back to brute-force search: %v\n", err)
-			return fallbackSearch(ctx, conn, req.Dataset, qvec, req.MinScore, req.Limit)
+			return fallbackSearch(ctx, conn, req.Dataset, qvec, req.MinScore, req.Limit, req.Offset)
 		}
 		if err != nil {
 			return nil, err
@@ -169,7 +180,7 @@ WHERE v.dataset_id = ?
   AND d.archived = 0
   AND v.match_score >= ?
 ORDER BY v.match_score DESC
-LIMIT ?`, req.Dataset, blob, req.MinScore, req.Limit)
+LIMIT ? OFFSET ?`, req.Dataset, blob, req.MinScore, req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}

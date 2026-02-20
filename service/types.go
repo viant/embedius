@@ -81,6 +81,7 @@ type SearchRequest struct {
 	Embedder embeddings.Embedder
 	Model    string
 	Limit    int
+	Offset   int
 	MinScore float64
 }
 

@@ -11,6 +11,8 @@ type Option func(*Options)
 type Options struct {
 	Embedder  embeddings.Embedder
 	NameSpace string
+	// Offset skips the first N results in ranked order.
+	Offset int
 	// Optional query-splitting configuration for long queries.
 	// If MaxQueryBytes > 0 and the query exceeds this size, the query is split
 	// into UTF-8 safe overlapping windows and embedded per-window.
@@ -28,6 +30,15 @@ func WithEmbedder(e embeddings.Embedder) Option {
 // WithNameSpace sets the logical namespace to operate on.
 func WithNameSpace(ns string) Option {
 	return func(o *Options) { o.NameSpace = ns }
+}
+
+// WithOffset skips the first N results in ranked order.
+func WithOffset(offset int) Option {
+	return func(o *Options) {
+		if offset > 0 {
+			o.Offset = offset
+		}
+	}
 }
 
 // WithQuerySplit enables UTF-8 safe query splitting for long queries.

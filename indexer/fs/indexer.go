@@ -141,7 +141,6 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 			return nil, nil, err
 		}
 		if upToDate {
-			fmt.Printf("embedius: index skip snapshot up-to-date location=%q\n", norm)
 			return nil, nil, nil
 		}
 	}
@@ -228,20 +227,12 @@ func (i *Indexer) Index(ctx context.Context, location string, cache *cache.Map[s
 				}
 			}
 			if processed%nextLog == 0 {
-				if stats != nil {
-					fmt.Printf("embedius: index progress location=%q processed=%d total=%d unchanged=%d changed=%d docs=%d\n", location, processed, totalCandidates, stats.Unchanged, stats.Changed, stats.Docs)
-				} else {
-					fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
-				}
+				_ = stats
 			}
 		}
 	}
 	if logProgress && totalCandidates > 0 && processed != totalCandidates {
-		if stats != nil {
-			fmt.Printf("embedius: index progress location=%q processed=%d total=%d unchanged=%d changed=%d docs=%d\n", location, processed, totalCandidates, stats.Unchanged, stats.Changed, stats.Docs)
-		} else {
-			fmt.Printf("embedius: index progress location=%q processed=%d total=%d\n", location, processed, totalCandidates)
-		}
+		_ = stats
 	}
 
 	return toAddDocuments, toRemove, nil
