@@ -28,6 +28,11 @@ import (
 	"github.com/viant/embedius/service"
 	"github.com/viant/sqlite-vec/engine"
 	"github.com/viant/sqlite-vec/vec"
+
+	_ "github.com/viant/afsc/aws"
+	_ "github.com/viant/afsc/gcp"
+	_ "github.com/viant/afsc/gs"
+	_ "github.com/viant/afsc/s3"
 )
 
 func main() {

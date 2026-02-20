@@ -8,6 +8,7 @@ require (
 	github.com/minio/highwayhash v1.0.3
 	github.com/shakinm/xlsReader v0.9.12
 	github.com/viant/afs v1.30.0
+	github.com/viant/afsc v1.9.1
 	github.com/viant/bigquery v0.5.1
 	github.com/viant/bintly v0.2.0
 	github.com/viant/jsonrpc v0.17.0
@@ -21,10 +22,15 @@ require (
 )
 
 require (
+	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.9.8 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.4 // indirect
+	cloud.google.com/go/iam v1.2.1 // indirect
+	cloud.google.com/go/secretmanager v1.14.1 // indirect
+	cloud.google.com/go/storage v1.43.0 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/aerospike/aerospike-client-go v4.5.2+incompatible // indirect
+	github.com/aws/aws-sdk-go v1.51.23 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
@@ -39,6 +45,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.13.0 // indirect
+	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/lestrrat-go/backoff/v2 v2.0.8 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.2 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
@@ -60,13 +67,18 @@ require (
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
+	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.54.0 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.46.1-0.20251013234738-63d1a5100f82 // indirect
+	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/time v0.7.0 // indirect
+	google.golang.org/genproto v0.0.0-20241007155032-5fefd90f89a9 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20251022142026-3a174f9686a8 // indirect
 	google.golang.org/grpc v1.77.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 )
