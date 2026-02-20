@@ -30,6 +30,7 @@ type StoreConfig struct {
 // RootConfig defines per-root settings.
 type RootConfig struct {
 	Path         string   `yaml:"path"`
+	Description  string   `yaml:"description"`
 	Include      []string `yaml:"include"`
 	Exclude      []string `yaml:"exclude"`
 	MaxSizeBytes int64    `yaml:"max_size_bytes"`
