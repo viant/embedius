@@ -19,6 +19,14 @@ import (
 	"github.com/viant/embedius/service"
 )
 
+type syncGroup struct {
+	shadow   string
+	batch    int
+	force    bool
+	interval time.Duration
+	roots    []service.RootSpec
+}
+
 func serveCmd(args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	dbPath := flags.String("db", "", "SQLite database path (required unless config has store.dsn)")
@@ -164,9 +172,11 @@ func resolveMCPAddrFromConfig(flagAddr string, cfg *service.Config) string {
 
 func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.Config, dbPath string) {
 	if cfg == nil || len(cfg.Upstreams) == 0 || len(cfg.Roots) == 0 {
-		return
+		if cfg == nil || len(cfg.Roots) == 0 || strings.TrimSpace(cfg.UpstreamStore.DSN) == "" || strings.TrimSpace(cfg.UpstreamStore.Driver) == "" {
+			return
+		}
 	}
-	upstreams := make(map[string]service.UpstreamConfig, len(cfg.Upstreams))
+	upstreams := make(map[string]service.UpstreamConfig, len(cfg.Upstreams)+1)
 	for _, up := range cfg.Upstreams {
 		if up.Name == "" {
 			continue
@@ -176,22 +186,81 @@ func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.C
 		}
 		upstreams[up.Name] = up
 	}
+	if strings.TrimSpace(cfg.UpstreamStore.DSN) != "" && strings.TrimSpace(cfg.UpstreamStore.Driver) != "" {
+		upstreams["default"] = service.UpstreamConfig{
+			Name:               "default",
+			Driver:             strings.TrimSpace(cfg.UpstreamStore.Driver),
+			DSN:                strings.TrimSpace(cfg.UpstreamStore.DSN),
+			Shadow:             "shadow_vec_docs",
+			Batch:              200,
+			Force:              false,
+			Enabled:            true,
+			MinIntervalSeconds: 0,
+		}
+	}
 	if len(upstreams) == 0 {
 		return
 	}
 
 	type job struct {
-		up    service.UpstreamConfig
-		roots []service.RootSpec
+		up     service.UpstreamConfig
+		groups []syncGroup
 	}
 	jobs := []job{}
 	for name, up := range upstreams {
-		var roots []service.RootSpec
+		defaultShadow := strings.TrimSpace(up.Shadow)
+		if defaultShadow == "" {
+			defaultShadow = "shadow_vec_docs"
+		}
+		defaultBatch := up.Batch
+		if defaultBatch <= 0 {
+			defaultBatch = 200
+		}
+		defaultInterval := time.Duration(up.MinIntervalSeconds) * time.Second
+
+		grouped := map[string]*syncGroup{}
 		for rootName, rc := range cfg.Roots {
-			if rc.UpstreamRef != name {
+			if rc.Path == "" {
 				continue
 			}
-			roots = append(roots, service.RootSpec{
+			if rc.SyncEnabled != nil && !*rc.SyncEnabled {
+				continue
+			}
+			ref := strings.TrimSpace(rc.UpstreamRef)
+			if ref == "" {
+				ref = "default"
+			}
+			if ref != name {
+				continue
+			}
+			shadow := defaultShadow
+			if strings.TrimSpace(rc.Shadow) != "" {
+				shadow = strings.TrimSpace(rc.Shadow)
+			}
+			batch := defaultBatch
+			if rc.Batch > 0 {
+				batch = rc.Batch
+			}
+			force := up.Force
+			if rc.Force != nil {
+				force = *rc.Force
+			}
+			interval := defaultInterval
+			if rc.MinInterval > 0 {
+				interval = time.Duration(rc.MinInterval) * time.Second
+			}
+			key := fmt.Sprintf("%s|%d|%t|%d", shadow, batch, force, interval)
+			group := grouped[key]
+			if group == nil {
+				group = &syncGroup{
+					shadow:   shadow,
+					batch:    batch,
+					force:    force,
+					interval: interval,
+				}
+				grouped[key] = group
+			}
+			group.roots = append(group.roots, service.RootSpec{
 				Name:         rootName,
 				Path:         rc.Path,
 				Include:      rc.Include,
@@ -199,10 +268,14 @@ func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.C
 				MaxSizeBytes: rc.MaxSizeBytes,
 			})
 		}
-		if len(roots) == 0 {
+		if len(grouped) == 0 {
 			continue
 		}
-		jobs = append(jobs, job{up: up, roots: roots})
+		groups := make([]syncGroup, 0, len(grouped))
+		for _, group := range grouped {
+			groups = append(groups, *group)
+		}
+		jobs = append(jobs, job{up: up, groups: groups})
 	}
 	if len(jobs) == 0 {
 		return
@@ -211,7 +284,9 @@ func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.C
 	for _, j := range jobs {
 		job := j
 		go func() {
-			runSyncLoop(ctx, svc, dbPath, job.up, job.roots)
+			for _, group := range job.groups {
+				runSyncLoop(ctx, svc, dbPath, job.up, group)
+			}
 		}()
 	}
 }
@@ -239,41 +314,32 @@ func buildRootSpecs(cfg *service.Config) map[string]service.RootSpec {
 	return out
 }
 
-func runSyncLoop(ctx context.Context, svc *service.Service, dbPath string, up service.UpstreamConfig, roots []service.RootSpec) {
+func runSyncLoop(ctx context.Context, svc *service.Service, dbPath string, up service.UpstreamConfig, group syncGroup) {
 	if up.DSN == "" || up.Driver == "" {
 		log.Printf("sync: upstream %q missing driver/dsn", up.Name)
 		return
 	}
-	shadow := up.Shadow
-	if shadow == "" {
-		shadow = "shadow_vec_docs"
-	}
-	batch := up.Batch
-	if batch <= 0 {
-		batch = 200
-	}
-	interval := time.Duration(up.MinIntervalSeconds) * time.Second
 	runOnce := func() {
 		err := svc.Sync(ctx, service.SyncRequest{
 			DBPath:         dbPath,
-			Roots:          roots,
+			Roots:          group.roots,
 			UpstreamDriver: up.Driver,
 			UpstreamDSN:    up.DSN,
-			UpstreamShadow: shadow,
-			SyncBatch:      batch,
-			ForceReset:     up.Force,
+			UpstreamShadow: group.shadow,
+			SyncBatch:      group.batch,
+			ForceReset:     group.force,
 			Logf:           log.Printf,
 		})
 		if err != nil {
-			log.Printf("sync: upstream=%s err=%v", up.Name, err)
+			log.Printf("sync: upstream=%s shadow=%s err=%v", up.Name, group.shadow, err)
 		}
 	}
-
-	runOnce()
-	if interval <= 0 {
+	if group.interval <= 0 {
+		runOnce()
 		return
 	}
-	ticker := time.NewTicker(interval)
+	runOnce()
+	ticker := time.NewTicker(group.interval)
 	defer ticker.Stop()
 	for {
 		select {

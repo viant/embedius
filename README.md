@@ -65,6 +65,13 @@ embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite
 #       - "**/node_modules/**"
 #       - "**/.git/**"
 #     max_size_bytes: 10485760
+#     # Optional sync controls (when serving with upstreamStore/upstreams):
+#     # syncEnabled: false
+#     # upstreamRef: custom   # overrides default upstreamStore
+#     # minIntervalSeconds: 60
+#     # batch: 200
+#     # shadow: shadow_vec_docs
+#     # force: false
 #   def:
 #     path: /abs/path/to/def
 #   etl:
@@ -162,6 +169,16 @@ store:
 upstreamStore:
   driver: mysql
   dsn: user:pass@tcp(host:3306)/db
+# Optional named upstreams for per-root overrides.
+# upstreams:
+#   - name: custom
+#     driver: mysql
+#     dsn: user:pass@tcp(host:3306)/otherdb
+#     shadow: shadow_vec_docs
+#     batch: 200
+#     force: false
+#     enabled: true
+#     minIntervalSeconds: 60
 roots:
   etl:
     path: /abs/path/to/etl
@@ -173,6 +190,13 @@ roots:
     exclude:
       - "**/*_test.go"
     max_size_bytes: 1048576
+    # Optional sync controls (default uses upstreamStore)
+    # syncEnabled: true
+    # upstreamRef: custom
+    # minIntervalSeconds: 60
+    # batch: 200
+    # shadow: shadow_vec_docs
+    # force: false
   newui:
     path: /abs/path/to/newui
     include:
@@ -191,6 +215,13 @@ roots:
       - "**/.cache/**"
     max_size_bytes: 1048576
 ```
+
+Notes:
+
+- When `upstreamStore` is configured, `embedius serve` will start background
+  sync loops for all roots unless `syncEnabled: false` is set.
+- A root may set `upstreamRef` to use a named entry from `upstreams` instead
+  of the default `upstreamStore`.
 
 ## Endly E2E
 

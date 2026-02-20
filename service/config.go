@@ -34,6 +34,11 @@ type RootConfig struct {
 	Exclude      []string `yaml:"exclude"`
 	MaxSizeBytes int64    `yaml:"max_size_bytes"`
 	UpstreamRef  string   `yaml:"upstreamRef"`
+	SyncEnabled  *bool    `yaml:"syncEnabled"`
+	MinInterval  int      `yaml:"minIntervalSeconds"`
+	Batch        int      `yaml:"batch"`
+	Shadow       string   `yaml:"shadow"`
+	Force        *bool    `yaml:"force"`
 }
 
 // UpstreamConfig defines upstream sync settings.
