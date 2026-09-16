@@ -497,7 +497,11 @@ func (s *Store) SimilaritySearch(ctx context.Context, query string, k int, opts 
 	}
 
 	if options.MaxQueryBytes > 0 && len(query) > options.MaxQueryBytes {
-		return s.similaritySearchWindows(ctx, query, k, options)
+		docs, err := s.similaritySearchWindows(ctx, query, k, options)
+		if err != nil {
+			return nil, err
+		}
+		return s.expandNeighborFragments(ctx, dataset, docs, options.NeighborFragmentsBefore, options.NeighborFragmentsAfter)
 	}
 
 	embedCtx, cancel := embeddingContext(ctx)
@@ -510,7 +514,123 @@ func (s *Store) SimilaritySearch(ctx context.Context, query string, k int, opts 
 	if err != nil {
 		return nil, err
 	}
-	return s.queryOnce(ctx, dataset, blob, k, options.Offset)
+	docs, err := s.queryOnce(ctx, dataset, blob, k, options.Offset)
+	if err != nil {
+		return nil, err
+	}
+	return s.expandNeighborFragments(ctx, dataset, docs, options.NeighborFragmentsBefore, options.NeighborFragmentsAfter)
+}
+
+func (s *Store) expandNeighborFragments(ctx context.Context, dataset string, anchors []schema.Document, before, after int) ([]schema.Document, error) {
+	if len(anchors) == 0 || (before <= 0 && after <= 0) {
+		return anchors, nil
+	}
+	seen := map[string]bool{}
+	result := make([]schema.Document, 0, len(anchors)*(before+after+1))
+	for _, anchor := range anchors {
+		path := metadataString(anchor.Metadata, "path")
+		if path == "" {
+			path = metadataString(anchor.Metadata, "docId")
+		}
+		anchorID := metadataString(anchor.Metadata, meta.FragmentID)
+		if path == "" || anchorID == "" {
+			if !seen[anchorID] {
+				seen[anchorID] = true
+				result = append(result, anchor)
+			}
+			continue
+		}
+		fragments, err := s.fragmentsByPath(ctx, dataset, path)
+		if err != nil {
+			return nil, err
+		}
+		anchorIndex := -1
+		for index := range fragments {
+			if metadataString(fragments[index].Metadata, meta.FragmentID) == anchorID {
+				anchorIndex = index
+				break
+			}
+		}
+		if anchorIndex < 0 {
+			if !seen[anchorID] {
+				seen[anchorID] = true
+				result = append(result, anchor)
+			}
+			continue
+		}
+		from := anchorIndex - before
+		if from < 0 {
+			from = 0
+		}
+		to := anchorIndex + after + 1
+		if to > len(fragments) {
+			to = len(fragments)
+		}
+		for index := from; index < to; index++ {
+			fragment := fragments[index]
+			fragmentID := metadataString(fragment.Metadata, meta.FragmentID)
+			if seen[fragmentID] {
+				continue
+			}
+			seen[fragmentID] = true
+			if fragmentID == anchorID {
+				fragment = anchor
+			} else {
+				fragment.Score = anchor.Score
+				fragment.Metadata = cloneMetadata(fragment.Metadata)
+				fragment.Metadata["neighborOf"] = anchorID
+				fragment.Metadata["neighborOffset"] = index - anchorIndex
+			}
+			result = append(result, fragment)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) fragmentsByPath(ctx context.Context, dataset, path string) ([]schema.Document, error) {
+	query := fmt.Sprintf(`SELECT id, content, meta
+FROM %s
+WHERE dataset_id = ?
+  AND archived = 0
+  AND (json_extract(meta, '$.path') = ? OR json_extract(meta, '$.docId') = ?)
+ORDER BY CAST(json_extract(meta, '$.start') AS INTEGER), id`, s.shadow)
+	rows, err := s.db.QueryContext(ctx, query, dataset, path, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []schema.Document
+	for rows.Next() {
+		var id, content, metaJSON string
+		if err := rows.Scan(&id, &content, &metaJSON); err != nil {
+			return nil, err
+		}
+		metadata, err := decodeMeta(metaJSON)
+		if err != nil {
+			return nil, err
+		}
+		if metadataString(metadata, meta.FragmentID) == "" {
+			metadata[meta.FragmentID] = id
+		}
+		result = append(result, schema.Document{PageContent: content, Metadata: metadata})
+	}
+	return result, rows.Err()
+}
+
+func metadataString(metadata map[string]interface{}, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func cloneMetadata(input map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(input)+2)
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
 }
 
 func (s *Store) similaritySearchWindows(ctx context.Context, query string, k int, options vectorstores.Options) ([]schema.Document, error) {

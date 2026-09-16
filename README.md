@@ -13,6 +13,22 @@ Embedius is a SQLite-backed vector indexing service for local files and upstream
 - Config-driven multi-root indexing
 - CLI and reusable service package
 
+### Neighbor fragment expansion
+
+SQLite vector searches can include source-adjacent indexed fragments around
+each semantic hit:
+
+```go
+docs, err := store.SimilaritySearch(ctx, query, 10,
+    vectorstores.WithNameSpace("product-docs"),
+    vectorstores.WithNeighborFragments(1, 1),
+)
+```
+
+Neighbors retain source order, inherit the anchor similarity score for
+downstream thresholding, and include `neighborOf` and `neighborOffset`
+metadata. Duplicate fragments are returned only once.
+
 ## Installation
 
 ```bash

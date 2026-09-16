@@ -20,6 +20,23 @@ type Options struct {
 	MaxQueryBytes   int
 	QueryOverlap    int
 	QueryAggregator string // "max" (default) or "mean"
+	// NeighborFragmentsBefore/After expand each semantic hit with adjacent
+	// indexed fragments from the same source document.
+	NeighborFragmentsBefore int
+	NeighborFragmentsAfter  int
+}
+
+// WithNeighborFragments expands each matched fragment with source-adjacent
+// indexed fragments. Negative values are normalized to zero.
+func WithNeighborFragments(before, after int) Option {
+	return func(o *Options) {
+		if before > 0 {
+			o.NeighborFragmentsBefore = before
+		}
+		if after > 0 {
+			o.NeighborFragmentsAfter = after
+		}
+	}
 }
 
 // WithEmbedder sets the embedder to use.
