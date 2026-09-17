@@ -2,7 +2,9 @@ package indexer
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/viant/embedius/document"
 	"github.com/viant/embedius/indexer/cache"
@@ -25,7 +27,7 @@ func (n noopStore) Remove(ctx context.Context, id string, option ...vectorstores
 }
 
 type countingIndexer struct {
-	calls int
+	calls atomic.Int32
 }
 
 func (c *countingIndexer) Namespace(ctx context.Context, URI string) (string, error) {
@@ -33,28 +35,55 @@ func (c *countingIndexer) Namespace(ctx context.Context, URI string) (string, er
 }
 
 func (c *countingIndexer) Index(ctx context.Context, URI string, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
-	c.calls++
+	c.calls.Add(1)
 	return nil, nil, nil
 }
 
-func TestServiceSkipIndexOnce(t *testing.T) {
+func TestServiceOpenDoesNotIndex(t *testing.T) {
 	ctx := context.Background()
 	idx := &countingIndexer{}
 	svc := NewService("", noopStore{}, nil, idx)
 
 	location := "file://example"
-	svc.SkipIndexOnce(location)
-	if _, err := svc.Add(ctx, location); err != nil {
-		t.Fatalf("Add failed: %v", err)
+	if _, err := svc.Open(ctx, location); err != nil {
+		t.Fatalf("Open failed: %v", err)
 	}
-	if idx.calls != 0 {
-		t.Fatalf("expected indexer not called, got %d", idx.calls)
+	if idx.calls.Load() != 0 {
+		t.Fatalf("expected indexer not called, got %d", idx.calls.Load())
 	}
 
 	if _, err := svc.Add(ctx, location); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
-	if idx.calls != 1 {
-		t.Fatalf("expected indexer called once after skip consumed, got %d", idx.calls)
+	if idx.calls.Load() != 1 {
+		t.Fatalf("expected indexer called once after Open, got %d", idx.calls.Load())
+	}
+}
+
+func TestServiceAddAsyncHonorsRefreshInterval(t *testing.T) {
+	ctx := WithAsyncIndexRefreshInterval(context.Background(), time.Hour)
+	idx := &countingIndexer{}
+	svc := NewService("", noopStore{}, nil, idx)
+	location := "file://example"
+
+	svc.AddAsync(ctx, location)
+	deadline := time.Now().Add(time.Second)
+	for {
+		svc.asyncMu.Lock()
+		refreshed := !svc.refreshed[location].IsZero()
+		svc.asyncMu.Unlock()
+		if refreshed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background refresh did not complete")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	svc.AddAsync(ctx, location)
+	time.Sleep(20 * time.Millisecond)
+	if actual := idx.calls.Load(); actual != 1 {
+		t.Fatalf("expected one index scan within refresh interval, got %d", actual)
 	}
 }

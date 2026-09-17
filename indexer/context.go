@@ -2,12 +2,14 @@ package indexer
 
 import (
 	"context"
+	"time"
 
 	"github.com/viant/embedius/vectordb"
 )
 
 type upstreamSyncKey struct{}
 type asyncIndexKey struct{}
+type asyncIndexRefreshIntervalKey struct{}
 
 // WithUpstreamSyncConfig attaches upstream sync config to the context.
 func WithUpstreamSyncConfig(ctx context.Context, cfg *vectordb.UpstreamSyncConfig) context.Context {
@@ -44,6 +46,27 @@ func AsyncIndexEnabled(ctx context.Context) bool {
 		return v
 	}
 	return false
+}
+
+// WithAsyncIndexRefreshInterval limits how frequently a location may complete
+// background indexing. A non-positive interval preserves the existing behavior
+// of checking on every request.
+func WithAsyncIndexRefreshInterval(ctx context.Context, interval time.Duration) context.Context {
+	if ctx == nil || interval <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, asyncIndexRefreshIntervalKey{}, interval)
+}
+
+// AsyncIndexRefreshInterval returns the configured background refresh interval.
+func AsyncIndexRefreshInterval(ctx context.Context) time.Duration {
+	if ctx == nil {
+		return 0
+	}
+	if value, ok := ctx.Value(asyncIndexRefreshIntervalKey{}).(time.Duration); ok && value > 0 {
+		return value
+	}
+	return 0
 }
 
 // UpstreamSyncConfigFromContext returns upstream config from context.
