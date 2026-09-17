@@ -242,29 +242,110 @@ func toInt64(v interface{}) int64 {
 	}
 }
 
-func splitFile(relPath string, data []byte, factory *splitter.Factory) ([]schema.Document, error) {
+func splitFile(relPath string, data []byte, factory *splitter.Factory, documentMetadata map[string]any) ([]schema.Document, error) {
 	s := factory.GetSplitter(relPath, len(data))
 	content := data
 	var fragments []*document.Fragment
+	baseMetadata := map[string]interface{}{
+		meta.DocumentID: relPath,
+		meta.PathKey:    relPath,
+	}
+	for key, value := range documentMetadata {
+		if key == meta.DocumentID || key == meta.PathKey || key == meta.FragmentID {
+			continue
+		}
+		baseMetadata[key] = value
+	}
 	if cs, ok := s.(splitter.ContentSplitter); ok {
-		fragments, content = cs.SplitWithContent(data, map[string]interface{}{
-			meta.DocumentID: relPath,
-			meta.PathKey:    relPath,
-		})
+		fragments, content = cs.SplitWithContent(data, baseMetadata)
 	} else {
-		fragments = s.Split(data, map[string]interface{}{
-			meta.DocumentID: relPath,
-			meta.PathKey:    relPath,
-		})
+		fragments = s.Split(data, baseMetadata)
 	}
 	if content == nil {
 		content = data
 	}
 	docs := make([]schema.Document, 0, len(fragments))
 	for _, frag := range fragments {
-		docs = append(docs, frag.NewDocument(relPath, content))
+		doc := frag.NewDocument(relPath, content)
+		for key, value := range documentMetadata {
+			if key == meta.DocumentID || key == meta.PathKey || key == meta.FragmentID {
+				continue
+			}
+			doc.Metadata[key] = value
+		}
+		docs = append(docs, doc)
 	}
 	return docs, nil
+}
+
+func metadataForFile(spec RootSpec, data []byte) (map[string]any, error) {
+	return spec.Metadata.Extract(data)
+}
+
+// refreshAssetMetadata updates only the persisted metadata JSON for an
+// unchanged asset. It deliberately retains document content and embedding
+// blobs, so changing a metadata mapping never triggers re-embedding.
+func refreshAssetMetadata(ctx context.Context, q sqlQueryer, datasetID, assetID string, targets []string, values map[string]any, driver string) (bool, error) {
+	if len(targets) == 0 {
+		return false, nil
+	}
+	docsTable := localDocsTable(driver)
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`SELECT id, meta FROM %s WHERE dataset_id=? AND asset_id=? AND archived=0`, docsTable), datasetID, assetID)
+	if err != nil {
+		return false, err
+	}
+	type update struct{ id, meta string }
+	var updates []update
+	for rows.Next() {
+		var id, raw string
+		if err = rows.Scan(&id, &raw); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		var current map[string]any
+		if err = json.Unmarshal([]byte(raw), &current); err != nil {
+			_ = rows.Close()
+			return false, fmt.Errorf("decode indexed metadata for %s: %w", id, err)
+		}
+		for _, key := range targets {
+			delete(current, key)
+		}
+		for key, value := range values {
+			current[key] = value
+		}
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		if string(encoded) != raw {
+			updates = append(updates, update{id: id, meta: string(encoded)})
+		}
+	}
+	if err = rows.Close(); err != nil {
+		return false, err
+	}
+	if err = rows.Err(); err != nil {
+		return false, err
+	}
+	if len(updates) == 0 {
+		return false, nil
+	}
+	scn, err := nextSCN(ctx, q, datasetID, driver)
+	if err != nil {
+		return false, err
+	}
+	stmt, err := q.PrepareContext(ctx, fmt.Sprintf(`UPDATE %s SET meta=?, scn=? WHERE dataset_id=? AND id=?`, docsTable))
+	if err != nil {
+		return false, err
+	}
+	defer stmt.Close()
+	for _, item := range updates {
+		if _, err = stmt.ExecContext(ctx, item.meta, scn, datasetID, item.id); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func ensureSchema(ctx context.Context, q sqlQueryer, driver string) error {

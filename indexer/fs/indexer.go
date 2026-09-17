@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/viant/afs/storage"
 	"github.com/viant/afs/url"
@@ -17,42 +18,71 @@ import (
 	"github.com/viant/embedius/indexer/cache"
 	"github.com/viant/embedius/indexer/fs/splitter"
 	"github.com/viant/embedius/matching"
+	"github.com/viant/embedius/metadata"
 	"github.com/viant/embedius/schema"
 	"github.com/viant/embedius/vectordb/meta"
 )
 
 // Indexer implements indexing for filesystem resources
 type Indexer struct {
-	fs              Service
-	baseURL         string
-	matcher         *matching.Manager
-	splitterFactory *splitter.Factory
-	embeddingsModel string
+	fs               Service
+	baseURL          string
+	matcher          *matching.Manager
+	splitterFactory  *splitter.Factory
+	embeddingsModel  string
+	metadataResolver MetadataResolver
+	metadataMu       sync.Mutex
+	metadataChanged  bool
+}
+
+// MetadataResolver returns document metadata extraction configuration for a
+// root or file URI. The resolver is optional; a nil resolver preserves the
+// existing path/document-id-only metadata behavior.
+type MetadataResolver func(context.Context, string) metadata.Config
+
+// Option configures a filesystem indexer.
+type Option func(*Indexer)
+
+// WithMetadataResolver attaches an optional metadata extraction resolver.
+func WithMetadataResolver(resolver MetadataResolver) Option {
+	return func(i *Indexer) { i.metadataResolver = resolver }
 }
 
 // New creates a new filesystem indexer
-func New(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory) *Indexer {
-	return &Indexer{
+func New(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory, options ...Option) *Indexer {
+	result := &Indexer{
 		fs:              NewAFS(),
 		baseURL:         baseURL,
 		matcher:         matcher,
 		embeddingsModel: embeddingsModel,
 		splitterFactory: splitterFactory,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(result)
+		}
+	}
+	return result
 }
 
 // NewWithFS creates a new filesystem indexer with a custom FS service implementation.
-func NewWithFS(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory, fsSvc Service) *Indexer {
+func NewWithFS(baseURL string, embeddingsModel string, matcher *matching.Manager, splitterFactory *splitter.Factory, fsSvc Service, options ...Option) *Indexer {
 	if fsSvc == nil {
 		fsSvc = NewAFS()
 	}
-	return &Indexer{
+	result := &Indexer{
 		fs:              fsSvc,
 		baseURL:         baseURL,
 		matcher:         matcher,
 		embeddingsModel: embeddingsModel,
 		splitterFactory: splitterFactory,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(result)
+		}
+	}
+	return result
 }
 
 // Namespace returns namespace
@@ -259,26 +289,32 @@ func relativePath(ctx context.Context, object storage.Object) string {
 // indexFile indexes a single file
 func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *cache.Map[string, document.Entry]) ([]schema.Document, []string, error) {
 	docId := url.Path(object.URL())
+	metadataConfig := i.metadataConfig(ctx, docId)
+	metadataEnabled := metadataConfig.Enabled()
 	relPath := relativePath(ctx, object)
-	if assets := existingAssets(ctx); assets != nil && relPath != "" {
-		if meta, ok := assets[relPath]; ok {
-			md5hex := ""
-			if withMD5, ok := object.(interface{ MD5() string }); ok {
-				md5hex = strings.TrimSpace(withMD5.MD5())
-			}
-			// If upstream md5 matches, treat as unchanged even when size is unknown or mismatched.
-			if md5hex != "" && meta.MD5 != "" && strings.EqualFold(md5hex, meta.MD5) {
-				return nil, nil, nil
-			}
-			if meta.Size == object.Size() && (md5hex == "" || md5hex == meta.MD5) {
-				return nil, nil, nil
+	if !metadataEnabled {
+		if assets := existingAssets(ctx); assets != nil && relPath != "" {
+			if meta, ok := assets[relPath]; ok {
+				md5hex := ""
+				if withMD5, ok := object.(interface{ MD5() string }); ok {
+					md5hex = strings.TrimSpace(withMD5.MD5())
+				}
+				// If upstream md5 matches, treat as unchanged even when size is unknown or mismatched.
+				if md5hex != "" && meta.MD5 != "" && strings.EqualFold(md5hex, meta.MD5) {
+					return nil, nil, nil
+				}
+				if meta.Size == object.Size() && (md5hex == "" || md5hex == meta.MD5) {
+					return nil, nil, nil
+				}
 			}
 		}
 	}
-	if existing := existingMD5s(ctx); existing != nil {
-		if withMD5, ok := object.(interface{ MD5() string }); ok {
-			if md5hex := strings.TrimSpace(withMD5.MD5()); md5hex != "" && existing[md5hex] {
-				return nil, nil, nil
+	if !metadataEnabled {
+		if existing := existingMD5s(ctx); existing != nil {
+			if withMD5, ok := object.(interface{ MD5() string }); ok {
+				if md5hex := strings.TrimSpace(withMD5.MD5()); md5hex != "" && existing[md5hex] {
+					return nil, nil, nil
+				}
 			}
 		}
 	}
@@ -291,15 +327,24 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 	if dataHash == 0 {
 		dataHash = uint64(object.ModTime().Unix())
 	}
-	if md5hex != "" {
+	if !metadataEnabled && md5hex != "" {
 		if existing := existingMD5s(ctx); existing != nil && existing[md5hex] {
 			return nil, nil, nil
 		}
 	}
 
+	documentMetadata, err := metadataConfig.Extract(data)
+	if err != nil {
+		return nil, nil, fmt.Errorf("extract metadata from %s: %w", docId, err)
+	}
+	fragmentMetadata := metadata.StringValues(documentMetadata)
 	prev, ok := cache.Get(docId)
 	if ok {
 		if prev.Hash == dataHash {
+			if mergeFragmentMetadata(prev.Fragments, fragmentMetadata) {
+				cache.Set(docId, prev)
+				i.markMetadataChanged()
+			}
 			return nil, nil, nil // No changes detected
 		}
 	}
@@ -327,6 +372,7 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 	if content == nil {
 		content = data
 	}
+	mergeFragmentMetadata(fragments, fragmentMetadata)
 	entry := &document.Entry{
 		ID:        docId,
 		ModTime:   object.ModTime(),
@@ -347,6 +393,54 @@ func (i *Indexer) indexFile(ctx context.Context, object storage.Object, cache *c
 		toRemove = prev.Fragments.VectorDBIDs()
 	}
 	return documents, toRemove, nil
+}
+
+// ConsumeMetadataChanges reports and clears metadata-only cache changes.
+func (i *Indexer) ConsumeMetadataChanges() bool {
+	if i == nil {
+		return false
+	}
+	i.metadataMu.Lock()
+	defer i.metadataMu.Unlock()
+	changed := i.metadataChanged
+	i.metadataChanged = false
+	return changed
+}
+
+func (i *Indexer) markMetadataChanged() {
+	i.metadataMu.Lock()
+	defer i.metadataMu.Unlock()
+	i.metadataChanged = true
+}
+
+func (i *Indexer) metadataConfig(ctx context.Context, uri string) metadata.Config {
+	if i == nil || i.metadataResolver == nil {
+		return metadata.Config{}
+	}
+	return i.metadataResolver(ctx, uri)
+}
+
+func mergeFragmentMetadata(fragments document.Fragments, values map[string]string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	changed := false
+	for _, fragment := range fragments {
+		if fragment == nil {
+			continue
+		}
+		if fragment.Meta == nil {
+			fragment.Meta = map[string]string{}
+		}
+		for key, value := range values {
+			if fragment.Meta[key] == value {
+				continue
+			}
+			fragment.Meta[key] = value
+			changed = true
+		}
+	}
+	return changed
 }
 
 // computeHash computes a hash for the given data

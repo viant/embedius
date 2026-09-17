@@ -266,6 +266,7 @@ func startUpstreamSync(ctx context.Context, svc *service.Service, cfg *service.C
 				Include:      rc.Include,
 				Exclude:      rc.Exclude,
 				MaxSizeBytes: rc.MaxSizeBytes,
+				Metadata:     rc.Metadata,
 			})
 		}
 		if len(grouped) == 0 {
@@ -306,6 +307,7 @@ func buildRootSpecs(cfg *service.Config) map[string]service.RootSpec {
 			Include:      root.Include,
 			Exclude:      root.Exclude,
 			MaxSizeBytes: root.MaxSizeBytes,
+			Metadata:     root.Metadata,
 		}
 	}
 	if len(out) == 0 {

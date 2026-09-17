@@ -14,6 +14,12 @@ type Indexer interface {
 	Namespace(ctx context.Context, URI string) (string, error)
 }
 
+// MetadataChangeReporter is implemented by indexers that can refresh cached
+// document metadata without producing new vector documents.
+type MetadataChangeReporter interface {
+	ConsumeMetadataChanges() bool
+}
+
 // Splitter represents an interface for splitting content into fragments
 type Splitter interface {
 	// Split splits content into fragments

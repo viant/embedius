@@ -4,6 +4,7 @@ import (
 	"database/sql"
 
 	"github.com/viant/embedius/embeddings"
+	"github.com/viant/embedius/metadata"
 )
 
 // RootSpec defines a dataset root with optional filters.
@@ -13,6 +14,7 @@ type RootSpec struct {
 	Include      []string
 	Exclude      []string
 	MaxSizeBytes int64
+	Metadata     metadata.Config
 }
 
 // ResolveRootsRequest specifies how roots should be resolved.

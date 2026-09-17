@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/viant/embedius/metadata"
 	"github.com/viant/scy/cred/secret"
 	"gopkg.in/yaml.v3"
 )
@@ -29,17 +30,18 @@ type StoreConfig struct {
 
 // RootConfig defines per-root settings.
 type RootConfig struct {
-	Path         string   `yaml:"path"`
-	Description  string   `yaml:"description"`
-	Include      []string `yaml:"include"`
-	Exclude      []string `yaml:"exclude"`
-	MaxSizeBytes int64    `yaml:"max_size_bytes"`
-	UpstreamRef  string   `yaml:"upstreamRef"`
-	SyncEnabled  *bool    `yaml:"syncEnabled"`
-	MinInterval  int      `yaml:"minIntervalSeconds"`
-	Batch        int      `yaml:"batch"`
-	Shadow       string   `yaml:"shadow"`
-	Force        *bool    `yaml:"force"`
+	Path         string          `yaml:"path"`
+	Description  string          `yaml:"description"`
+	Include      []string        `yaml:"include"`
+	Exclude      []string        `yaml:"exclude"`
+	MaxSizeBytes int64           `yaml:"max_size_bytes"`
+	UpstreamRef  string          `yaml:"upstreamRef"`
+	SyncEnabled  *bool           `yaml:"syncEnabled"`
+	MinInterval  int             `yaml:"minIntervalSeconds"`
+	Batch        int             `yaml:"batch"`
+	Shadow       string          `yaml:"shadow"`
+	Force        *bool           `yaml:"force"`
+	Metadata     metadata.Config `yaml:"metadata,omitempty"`
 }
 
 // UpstreamConfig defines upstream sync settings.

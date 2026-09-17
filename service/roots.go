@@ -29,7 +29,7 @@ func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, error) {
 				if strings.TrimSpace(name) == "" || strings.TrimSpace(p.Path) == "" {
 					continue
 				}
-				out = append(out, RootSpec{Name: name, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes})
+				out = append(out, RootSpec{Name: name, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes, Metadata: p.Metadata})
 			}
 			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 			if len(out) == 0 {
@@ -44,7 +44,7 @@ func ResolveRoots(req ResolveRootsRequest) ([]RootSpec, error) {
 		if !ok || strings.TrimSpace(p.Path) == "" {
 			return nil, fmt.Errorf("root %q not found in config", req.Root)
 		}
-		return []RootSpec{{Name: req.Root, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes}}, nil
+		return []RootSpec{{Name: req.Root, Path: p.Path, Include: p.Include, Exclude: p.Exclude, MaxSizeBytes: p.MaxSizeBytes, Metadata: p.Metadata}}, nil
 	}
 	if req.Root == "" {
 		return nil, fmt.Errorf("root is required")

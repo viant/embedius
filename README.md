@@ -81,6 +81,15 @@ embedius index --config /path/to/roots.yaml --all --db /tmp/vec.sqlite
 #       - "**/node_modules/**"
 #       - "**/.git/**"
 #     max_size_bytes: 10485760
+#     # Optional document metadata extraction. The extractor runs during
+#     # indexing and metadata-only refreshes update stored fragment metadata
+#     # without recomputing embeddings.
+#     metadata:
+#       extractor: yaml-frontmatter
+#       fields:
+#         document.title: title
+#         source.url: sourceUrl
+#         source.updatedAt: sourceUpdatedAt
 #     # Optional sync controls (when serving with upstreamStore/upstreams):
 #     # syncEnabled: false
 #     # upstreamRef: custom   # overrides default upstreamStore

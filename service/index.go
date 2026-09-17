@@ -111,7 +111,14 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 				req.Progress(spec.Name, i+1, total, f.rel, tokenTotal)
 			}
 			info, ok := assets[f.assetID]
+			documentMetadata, err := metadataForFile(spec, f.data)
+			if err != nil {
+				return fmt.Errorf("extract metadata root=%s path=%s: %w", spec.Name, f.rel, err)
+			}
 			if ok && info.md5 == f.md5 && !info.archived {
+				if _, err := refreshAssetMetadata(ctx, conn, spec.Name, f.assetID, spec.Metadata.Targets(), documentMetadata, driver); err != nil {
+					return fmt.Errorf("refresh metadata root=%s path=%s: %w", spec.Name, f.rel, err)
+				}
 				continue
 			}
 			if req.Logf != nil {
@@ -125,7 +132,7 @@ func (s *Service) Index(ctx context.Context, req IndexRequest) error {
 				return err
 			}
 
-			docs, err := splitFile(f.rel, f.data, factory)
+			docs, err := splitFile(f.rel, f.data, factory, documentMetadata)
 			if err != nil {
 				return err
 			}

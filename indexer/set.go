@@ -52,7 +52,41 @@ func (s *Set) SimilaritySearch(ctx context.Context, query string, numDocuments i
 	if err != nil {
 		return nil, fmt.Errorf("failed to search vector vectorDb: %w", err)
 	}
-	return documents, nil
+	return s.enrichCachedMetadata(documents), nil
+}
+
+func (s *Set) enrichCachedMetadata(documents []schema.Document) []schema.Document {
+	for index := range documents {
+		doc := &documents[index]
+		if doc.Metadata == nil {
+			continue
+		}
+		documentID, _ := doc.Metadata[meta.DocumentID].(string)
+		if documentID == "" {
+			documentID, _ = doc.Metadata[meta.PathKey].(string)
+		}
+		entry, ok := s.cache.Get(documentID)
+		if !ok || entry == nil {
+			continue
+		}
+		fragmentID, _ := doc.Metadata[meta.FragmentID].(string)
+		if len(entry.Fragments) == 0 {
+			continue
+		}
+		fragment := entry.Fragments[0]
+		if fragmentID != "" {
+			fragment = entry.Fragments.ByFragmentID(documentID)[fragmentID]
+		}
+		if fragment == nil {
+			continue
+		}
+		for key, value := range fragment.Meta {
+			if _, exists := doc.Metadata[key]; !exists {
+				doc.Metadata[key] = value
+			}
+		}
+	}
+	return documents
 }
 
 // ensureEmbedder ensures the vector vectorDb options include an embedder
@@ -100,7 +134,12 @@ func (s *Set) Index(ctx context.Context, URI string) error {
 	}
 
 	if len(toAddDocuments) == 0 && len(toRemove) == 0 {
-		return nil // Nothing changed
+		if reporter, ok := s.indexer.(MetadataChangeReporter); ok && reporter.ConsumeMetadataChanges() {
+			// Filesystem metadata changed independently of vector content. Persist
+			// the fragment cache without generating new embeddings.
+			return s.Persist(ctx)
+		}
+		return nil
 	}
 
 	// Skip embedding documents whose md5 already exists in the dataset.
