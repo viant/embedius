@@ -450,6 +450,8 @@ ON CONFLICT(dataset_id, id) DO UPDATE SET
 	}
 	defer stmt.Close()
 
+	defer vec.InvalidateCache(s.shadow, dataset)
+
 	ids := make([]string, len(docs))
 	for i, doc := range docs {
 		if doc.Metadata == nil {
@@ -748,21 +750,26 @@ func (s *Store) queryOnce(ctx context.Context, dataset string, blob []byte, k in
 	if offset < 0 {
 		offset = 0
 	}
-	query := fmt.Sprintf(`SELECT d.id, d.content, d.meta, v.match_score
-FROM %s v
-JOIN %s d ON d.dataset_id = v.dataset_id AND d.id = v.doc_id
-WHERE v.dataset_id = ?
-  AND v.doc_id MATCH ?
-  AND d.archived = 0
-ORDER BY v.match_score DESC
-LIMIT ? OFFSET ?`, s.vtable, s.shadow)
-
-	rows, err := s.db.QueryContext(ctx, query, dataset, blob, k, offset)
+	qvec, err := vector.DecodeEmbedding(blob)
 	if err != nil {
-		if isMatchUnavailable(err) {
-			fmt.Printf("sqlitevec: MATCH unavailable, falling back to brute-force search (performance may degrade): %v\n", err)
-			return s.fallbackSearch(ctx, dataset, blob, k, offset)
-		}
+		return nil, err
+	}
+	// Search outside a virtual-table callback so cancellation reaches index
+	// construction and waiting, and reads never acquire a database write lock.
+	matches, err := vec.Search(ctx, s.db, s.vtable, dataset, qvec)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(matches)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`SELECT d.id, d.content, d.meta, json_extract(v.value, '$.score')
+ FROM json_each(?) v JOIN %s d ON d.id = json_extract(v.value, '$.id')
+ WHERE d.dataset_id = ? AND d.archived = 0
+ ORDER BY json_extract(v.value, '$.score') DESC LIMIT ? OFFSET ?`, s.shadow)
+	rows, err := s.db.QueryContext(ctx, query, string(encoded), dataset, k, offset)
+	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()

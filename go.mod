@@ -92,7 +92,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/viant/sqlite-vec v0.3.0
+	github.com/viant/sqlite-vec v0.3.1-0.20261026203134-2a65d6adc1e1
 	github.com/viant/toolbox v0.37.1-0.20241210210120-32350b063cf8 // indirect
 	github.com/viant/vec v0.2.4-0.20250819200643-7e16b6ea443c // indirect
 	github.com/viant/xreflect v0.7.3 // indirect
