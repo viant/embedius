@@ -31,6 +31,8 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/aerospike/aerospike-client-go v4.5.2+incompatible // indirect
 	github.com/aws/aws-sdk-go v1.51.23 // indirect
+	github.com/blevesearch/snowballstem v0.9.0
+	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect

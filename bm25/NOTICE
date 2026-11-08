@@ -1,0 +1,12 @@
+BM25 scoring is independently implemented from the published Okapi formula.
+
+The English stop-word list is sourced from stop-words 0.9.0 (NLTK English list).
+See STOPWORDS-LICENSE.md.
+
+Unicode transliteration data is from deunicode 1.6.2. The Go decoder follows
+that data format. Original copyright and BSD-3-Clause terms are preserved in
+deunicode-data/LICENSE.
+
+Unicode word segmentation and English Snowball stemming are provided by the
+Go module dependencies github.com/clipperhouse/uax29/v2 and
+github.com/blevesearch/snowballstem, respectively.
