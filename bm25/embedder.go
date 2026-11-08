@@ -27,7 +27,7 @@ func Fit(ctx context.Context, documents []string) (*Embedder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return fitTerms(terms), nil
+	return fitTerms(ctx, terms)
 }
 
 func analyzeDocuments(ctx context.Context, documents []string) ([][]string, error) {
@@ -41,13 +41,19 @@ func analyzeDocuments(ctx context.Context, documents []string) ([][]string, erro
 		}
 		result[i] = defaultAnalyzer(document)
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
-func fitTerms(documents [][]string) *Embedder {
+func fitTerms(ctx context.Context, documents [][]string) (*Embedder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	frequencies := map[string]int{}
 	total := 0
 	for _, terms := range documents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		total += len(terms)
 		seen := map[string]bool{}
 		for _, term := range terms {
@@ -66,7 +72,7 @@ func fitTerms(documents [][]string) *Embedder {
 		df := float32(count)
 		e.idf[term] = float32(math.Log(float64(1 + (float32(len(documents))-df+0.5)/(df+0.5))))
 	}
-	return e
+	return e, ctx.Err()
 }
 
 // EmbedDocuments returns independent sparse document vectors with TF saturation,
@@ -76,12 +82,18 @@ func (e *Embedder) EmbedDocuments(ctx context.Context, documents []string) ([]Ve
 	if err != nil {
 		return nil, err
 	}
-	return e.embedTerms(terms), nil
+	return e.embedTerms(ctx, terms)
 }
 
-func (e *Embedder) embedTerms(documents [][]string) []Vector {
+func (e *Embedder) embedTerms(ctx context.Context, documents [][]string) ([]Vector, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result := make([]Vector, len(documents))
 	for i, terms := range documents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		counts := map[string]int{}
 		for _, term := range terms {
 			counts[term]++
@@ -97,7 +109,7 @@ func (e *Embedder) embedTerms(documents [][]string) []Vector {
 		}
 		result[i] = vector
 	}
-	return result
+	return result, ctx.Err()
 }
 
 // EmbedQuery counts query terms; repeated occurrences contribute repeatedly.
@@ -111,7 +123,7 @@ func (e *Embedder) EmbedQuery(ctx context.Context, query string) (Vector, error)
 			result[term]++
 		}
 	}
-	return result, nil
+	return result, ctx.Err()
 }
 
 // Score computes the sparse dot product between a document and a query.

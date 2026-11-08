@@ -110,3 +110,46 @@ func BenchmarkSearch(b *testing.B) {
 		_, _ = idx.Search(context.Background(), "cached metadata category7", 7)
 	}
 }
+
+// cancelAtCheckpoint models a cancellation that arrives after initial admission
+// without relying on wall-clock sleeps or a particular machine's speed.
+type cancelAtCheckpoint struct {
+	context.Context
+	checks int
+	after  int
+	cancel context.CancelFunc
+}
+
+func (c *cancelAtCheckpoint) Err() error {
+	c.checks++
+	if c.checks > c.after {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+func TestCancellationAfterAdmission(t *testing.T) {
+	fitted, _ := Fit(context.Background(), []string{"document catalog"})
+	cases := []struct {
+		name  string
+		after int
+		run   func(context.Context) error
+	}{
+		{"fit", 1, func(ctx context.Context) error { _, e := Fit(ctx, []string{"document catalog"}); return e }},
+		{"documents", 1, func(ctx context.Context) error {
+			_, e := fitted.EmbedDocuments(ctx, []string{"document catalog"})
+			return e
+		}},
+		{"query", 1, func(ctx context.Context) error { _, e := fitted.EmbedQuery(ctx, "document catalog"); return e }},
+		{"index", 2, func(ctx context.Context) error { _, e := New(ctx, []Document{{"doc", "document catalog"}}); return e }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			controlled := &cancelAtCheckpoint{Context: ctx, after: tc.after, cancel: cancel}
+			if err := tc.run(controlled); err != context.Canceled {
+				t.Fatalf("got %v, want cancellation", err)
+			}
+		})
+	}
+}

@@ -37,10 +37,16 @@ type Index struct {
 
 // New constructs an index, rejecting duplicate or empty document identifiers.
 func New(ctx context.Context, documents []Document) (*Index, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	texts := make([]string, len(documents))
 	ids := make([]string, len(documents))
 	seen := map[string]bool{}
 	for i, d := range documents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if d.ID == "" || seen[d.ID] {
 			return nil, fmt.Errorf("bm25: duplicate or empty document identifier")
 		}
@@ -52,16 +58,25 @@ func New(ctx context.Context, documents []Document) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := fitTerms(terms)
-	vectors := e.embedTerms(terms)
+	e, err := fitTerms(ctx, terms)
+	if err != nil {
+		return nil, err
+	}
+	vectors, err := e.embedTerms(ctx, terms)
+	if err != nil {
+		return nil, err
+	}
 	idx := &Index{ids: ids, postings: map[string][]posting{}}
 	for id, v := range vectors {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		for term, w := range v {
 			idx.postings[term] = append(idx.postings[term], posting{id, w})
 		}
 	}
 	idx.scratch.New = func() any { return &scratch{scores: make([]float32, len(ids))} }
-	return idx, nil
+	return idx, ctx.Err()
 }
 
 // Search returns at most limit results. A non-positive limit returns all matches.
